@@ -1,6 +1,19 @@
-$root = "D:\"
-$outItemsCsv   = "D_media_items.csv"
-$outSeasonsCsv = "D_media_seasons_detected.csv"
+param(
+    [Parameter(Mandatory=$false)]
+    [string]$RootPath = "D:\"
+)
+
+# Normalize the path and derive output filenames from it
+$root = $RootPath.TrimEnd('\')
+if ($root -match '^[A-Z]:$') {
+    # It's a drive letter like "D:" - add backslash
+    $root = $root + "\"
+}
+
+# Derive CSV names from the drive letter or folder name
+$driveLetter = if ($root -match '^([A-Z]):') { $matches[1] } else { "media" }
+$outItemsCsv   = "${driveLetter}_media_items.csv"
+$outSeasonsCsv = "${driveLetter}_media_seasons_detected.csv"
 
 $videoExt = @(".mkv",".mp4",".m4v",".avi",".mov",".wmv",".ts",".m2ts",".webm")
 $archiveEndings = @(".tar",".tgz",".tar.gz",".tar.xz",".tar.zst",".zip",".7z",".rar") # include zip/7z if you also bundle that way
@@ -240,9 +253,9 @@ function Update-ScanProgress($currentName) {
     $statusLine = "Processed $processed/$totalItems | Movies:$movieCount TVeps:$tvEpisodeCount TVbundles:$tvBundleCount Personal:$personalCount Unknown:$unknownCount | ffprobe fails:$ffprobeFailed | ETA: {0:hh\:mm\:ss}" -f $eta
 
     if ($showPathInProgress) {
-        Write-Progress -Activity "Scanning D: media" -Status "$statusLine`n$currentName" -PercentComplete $pct
+        Write-Progress -Activity "Scanning $root media" -Status "$statusLine`n$currentName" -PercentComplete $pct
     } else {
-        Write-Progress -Activity "Scanning D: media" -Status $statusLine -PercentComplete $pct
+        Write-Progress -Activity "Scanning $root media" -Status $statusLine -PercentComplete $pct
     }
 
     if (($processed % $logEvery) -eq 0) {
@@ -356,7 +369,7 @@ foreach ($path in $archivePaths) {
     Update-ScanProgress $fi.Name
 }
 
-Write-Progress -Activity "Scanning D: media" -Completed
+Write-Progress -Activity "Scanning $root media" -Completed
 
 $rows | Export-Csv $outItemsCsv -NoTypeInformation
 $seasonFolderRows | Export-Csv $outSeasonsCsv -NoTypeInformation
