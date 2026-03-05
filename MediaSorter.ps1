@@ -84,11 +84,21 @@ function SeasonInfoFromName($text) {
     $m2 = [regex]::Match($t, '(?i)\bSeason[\s\._-]*(?<sn>\d{1,2})\b')
     # Match "Series 1" (UK naming)
     $m3 = [regex]::Match($t, '(?i)\bSeries[\s\._-]*(?<sn>\d{1,2})\b')
+    # Match "Ep01", "EP6", "Episode 01" (anime/non-standard naming) - treat episode number as implicit season 1
+    $m4 = [regex]::Match($t, '(?i)\bEp(?:isode)?[\s\._-]*\d{1,2}\b')
+    # Match compact folder names like "TNGS05"
+    $m5 = [regex]::Match($t, '(?i)^(?<show>[A-Za-z][A-Za-z0-9]{1,})S(?<sn>\d{1,2})$')
 
     $sn = $null
+    $showFromCompact = $null
     if ($m1.Success) { $sn = $m1.Groups["sn"].Value }
     elseif ($m2.Success) { $sn = $m2.Groups["sn"].Value }
     elseif ($m3.Success) { $sn = $m3.Groups["sn"].Value }
+    elseif ($m4.Success) { $sn = "1" }  # Ep## without season info defaults to S01
+    elseif ($m5.Success) {
+        $sn = $m5.Groups["sn"].Value
+        $showFromCompact = $m5.Groups["show"].Value
+    }
 
     if (-not $sn) { return @{ Matched=$false } }
 
@@ -96,10 +106,15 @@ function SeasonInfoFromName($text) {
 
     # Guess show by removing season tokens & common quality tags
     $show = $t
-    $show = [regex]::Replace($show, '(?i)\bS\d{1,2}\b', '')
-    $show = [regex]::Replace($show, '(?i)\bSeason[\s\._-]*\d{1,2}\b', '')
-    $show = [regex]::Replace($show, '(?i)\bSeries[\s\._-]*\d{1,2}\b', '')
-    $show = [regex]::Replace($show, '(?i)\bComplete\b|\bWEB[-\s]?DL\b|\bBluRay\b|\b1080p\b|\b720p\b|\b2160p\b|\b4K\b|\bHDR\b', '')
+    if ($showFromCompact) {
+        $show = $showFromCompact
+    } else {
+        $show = [regex]::Replace($show, '(?i)\bS\d{1,2}\b', '')
+        $show = [regex]::Replace($show, '(?i)\bSeason[\s\._-]*\d{1,2}\b', '')
+        $show = [regex]::Replace($show, '(?i)\bSeries[\s\._-]*\d{1,2}\b', '')
+        $show = [regex]::Replace($show, '(?i)\bEp(?:isode)?[\s\._-]*\d{1,2}\b', '')
+        $show = [regex]::Replace($show, '(?i)\bComplete\b|\bWEB[-\s]?DL\b|\bBluRay\b|\b1080p\b|\b720p\b|\b2160p\b|\b4K\b|\bHDR\b', '')
+    }
     $show = $show -replace '[\._]+', ' '
     $show = $show.Trim(" -_.")
 
@@ -111,7 +126,8 @@ function LooksLikeTvFolderName($folderName) {
     return (
         $n -match '\bseason\b' -or
         $n -match '\bseries\b' -or
-        $n -match '\bs\d{1,2}\b'
+        $n -match '\bs\d{1,2}\b' -or
+        $n -match '^[a-z0-9]{2,}s\d{1,2}$'
     )
 }
 
@@ -124,15 +140,18 @@ function ScoreAndClassifyVideo($fileInfo, $durMin, $w, $h, $inSeasonFolder) {
     $pathMovieHint = ($p -match "\\movies\\") -or ($p -match "\\film\\") -or ($p -match "\\blu-?ray\\") -or ($p -match "\\dvds\\")
     $pathTvHint    = ($p -match "\\tv\\") -or ($p -match "\\tv shows\\") -or ($p -match "\\series\\") -or ($p -match "\\season")
     $pathClipHint  = ($p -match "\\clips\\") -or ($p -match "\\obs\\") -or ($p -match "\\recordings\\") -or ($p -match "\\captures\\") -or ($p -match "\\youtube\\") -or ($p -match "\\twitch\\") -or ($p -match "\\gameplay\\") -or ($p -match "\\stream")
+    $pathAnimeHint = ($p -match "\\anime\\") -or ($fullPath -match '\[\w+-\w+\]') -or ($p -match "\\hentai\\")  # folder named anime, or [SubGroup] naming, or hentai folder
 
     # Filename hints
-    $isEpisodePattern = ($baseName -match '(?i)\bS\d{1,2}E\d{1,2}\b') -or ($baseName -match '(?i)\b\d{1,2}x\d{1,2}\b')
+    $isEpisodePattern = ($baseName -match '(?i)\bS\d{1,2}E\d{1,2}\b') -or ($baseName -match '(?i)\b\d{1,2}x\d{1,2}\b') -or ($baseName -match '(?i)\bEp(?:isode)?[\s\._-]*\d{1,2}\b')
     $hasYear = ($baseName -match '(19|20)\d{2}')
+    $hasQualityTag = ($baseName -match '(?i)BluRay|Remux|WEB-DL|HDTV')
 
     # Duration heuristics
     $looksMovieByDur = ($durMin -ge 70)
     $looksTvByDur    = ($durMin -ge 18 -and $durMin -le 70)
     $looksClipByDur  = ($durMin -gt 0 -and $durMin -lt 18)
+    $looksShortFilmByDur = ($durMin -ge 30 -and $durMin -lt 70)  # short films: 30-70 min
 
     # Scores
     $scoreMovie = 0
@@ -141,6 +160,7 @@ function ScoreAndClassifyVideo($fileInfo, $durMin, $w, $h, $inSeasonFolder) {
 
     if ($pathMovieHint) { $scoreMovie += 35 }
     if ($pathTvHint)    { $scoreTv += 35 }
+    if ($pathAnimeHint) { $scoreTv += 25 }  # anime folders lean toward TV but not as strongly as TV path
     if ($pathClipHint)  { $scorePersonal += 35 }
 
     if ($isEpisodePattern) { $scoreTv += 55 }
@@ -149,6 +169,14 @@ function ScoreAndClassifyVideo($fileInfo, $durMin, $w, $h, $inSeasonFolder) {
     if ($looksMovieByDur) { $scoreMovie += 35 }
     if ($looksTvByDur)    { $scoreTv += 25 }
     if ($looksClipByDur)  { $scorePersonal += 25 }
+
+    # Short film boost: if it has year + quality tag + is in short film duration range, boost as likely short film (not episode)
+    if ($looksShortFilmByDur -and $hasYear -and $hasQualityTag) { 
+           $scoreMovie += 40  # strong boost for short films with metadata
+           if (-not $isEpisodePattern -and -not $pathTvHint) {
+              $scoreTv -= 10   # penalize TV score if it has NO episode pattern and is in 30-45 min range
+           }
+    }
 
     if ($hasYear -and $looksMovieByDur) { $scoreMovie += 10 }
 
@@ -261,7 +289,13 @@ function Update-ScanProgress($currentName) {
     $statusLine = "Processed $processed/$totalItems | Movies:$movieCount TVeps:$tvEpisodeCount TVbundles:$tvBundleCount Personal:$personalCount Unknown:$unknownCount | ffprobe fails:$ffprobeFailed | ETA: {0:hh\:mm\:ss}" -f $eta
 
     if ($showPathInProgress) {
-        Write-Progress -Activity "Scanning $root media" -Status "$statusLine`n$currentName" -PercentComplete $pct
+        # Truncate filename if too long to prevent display corruption
+        if ($currentName.Length -gt 60) {
+            $displayName = $currentName.Substring(0, 57) + "..."
+        } else {
+            $displayName = $currentName
+        }
+        Write-Progress -Activity "Scanning $root media" -Status $statusLine -CurrentOperation $displayName -PercentComplete $pct
     } else {
         Write-Progress -Activity "Scanning $root media" -Status $statusLine -PercentComplete $pct
     }
@@ -289,6 +323,8 @@ foreach ($path in $videoPaths) {
         $w=$info.Width; $h=$info.Height
     } else {
         $ffprobeFailed++
+        # Log ffprobe failure - helps identify corrupted files
+        $errorLog.Add(("FFPROBE_FAILED :: {0}" -f (Split-Path $path -Leaf)))
     }
 
     $class = ScoreAndClassifyVideo $fi $durMin $w $h $inSeasonFolder
@@ -405,3 +441,16 @@ if ($errorLog.Count -gt 0) {
     }
     Write-Host "=== END ERRORS ===" -ForegroundColor Yellow
 }
+
+# Signal completion with visual marker and beep
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Green
+Write-Host "         SCAN COMPLETE" -ForegroundColor Green
+Write-Host "========================================" -ForegroundColor Green
+
+# Play a completion sound (three ascending tones)
+[System.Console]::Beep(800, 100)   # Low tone
+Start-Sleep -Milliseconds 150
+[System.Console]::Beep(1000, 100)  # Mid tone
+Start-Sleep -Milliseconds 150
+[System.Console]::Beep(1200, 200)  # High tone (longer)
