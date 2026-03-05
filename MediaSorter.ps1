@@ -14,6 +14,8 @@ if ($root -match '^[A-Z]:$') {
 $driveLetter = if ($root -match '^([A-Z]):') { $matches[1] } else { "media" }
 $outItemsCsv   = "${driveLetter}_media_items.csv"
 $outSeasonsCsv = "${driveLetter}_media_seasons_detected.csv"
+$outGroupsCsv  = "${driveLetter}_media_groups.csv"
+$outDupesCsv   = "${driveLetter}_media_duplicates.csv"
 
 $videoExt = @(".mkv",".mp4",".m4v",".avi",".mov",".wmv",".ts",".m2ts",".webm")
 $archiveEndings = @(".tar",".tgz",".tar.gz",".tar.xz",".tar.zst",".zip",".7z",".rar") # include zip/7z if you also bundle that way
@@ -131,6 +133,167 @@ function LooksLikeTvFolderName($folderName) {
     )
 }
 
+function EpisodeInfoFromName($text) {
+    # Returns @{ Show=""; Season="S01"; Episode="E05"; Matched=$true } or @{Matched=$false}
+    $t = $text
+
+    # Match "S01E05", "S1E5", etc.
+    $m1 = [regex]::Match($t, '(?i)\bS(?<sn>\d{1,2})E(?<ep>\d{1,2})\b')
+    # Match "1x05", "01x05", etc.
+    $m2 = [regex]::Match($t, '(?i)\b(?<sn>\d{1,2})x(?<ep>\d{1,2})\b')
+    # Match "Episode 05", "Ep05", "EP_05"
+    $m3 = [regex]::Match($t, '(?i)\bEp(?:isode)?[\s\._-]*(?<ep>\d{1,2})\b')
+
+    $sn = $null
+    $ep = $null
+
+    if ($m1.Success) { 
+        $sn = $m1.Groups["sn"].Value 
+        $ep = $m1.Groups["ep"].Value
+    }
+    elseif ($m2.Success) { 
+        $sn = $m2.Groups["sn"].Value 
+        $ep = $m2.Groups["ep"].Value
+    }
+    elseif ($m3.Success) { 
+        $sn = "1"  # Default to season 1 if not specified
+        $ep = $m3.Groups["ep"].Value
+    }
+
+    if (-not $ep) { return @{ Matched=$false } }
+
+    $season = ("S{0:D2}" -f ([int]$sn))
+    $episode = ("E{0:D2}" -f ([int]$ep))
+
+    # Extract show name by removing episode markers and quality tags
+    $show = $t
+    $show = [regex]::Replace($show, '(?i)\bS\d{1,2}E\d{1,2}\b', '')
+    $show = [regex]::Replace($show, '(?i)\b\d{1,2}x\d{1,2}\b', '')
+    $show = [regex]::Replace($show, '(?i)\bEp(?:isode)?[\s\._-]*\d{1,2}\b', '')
+    $show = [regex]::Replace($show, '(?i)\bComplete\b|\bWEB[-\s]?DL\b|\bBluRay\b|\b1080p\b|\b720p\b|\b2160p\b|\b4K\b|\bHDR\b|\bHEVC\b|\bx264\b|\bx265\b', '')
+    $show = $show -replace '[\._]+', ' '
+    $show = $show.Trim(" -_.")
+
+    return @{ Matched=$true; Show=$show; Season=$season; Episode=$episode }
+}
+
+function ScoreAndClassifyArchive($fileInfo, $inSeasonFolder) {
+    $fullPath = $fileInfo.FullName
+    $baseName = $fileInfo.BaseName
+    $p = $fullPath.ToLower()
+    $sizeGB = [math]::Round($fileInfo.Length / 1GB, 3)
+
+    # Path hints
+    $pathMovieHint = ($p -match "\\movies\\") -or ($p -match "\\film\\") -or ($p -match "\\blu-?ray\\") -or ($p -match "\\dvds\\")
+    $pathTvHint    = ($p -match "\\tv\\") -or ($p -match "\\tv shows\\") -or ($p -match "\\series\\") -or ($p -match "\\season")
+    $pathAnimeHint = ($p -match "\\anime\\") -or ($fullPath -match '\[\w+-\w+\]') -or ($p -match "\\hentai\\")
+
+    # Filename hints
+    $isSeasonPattern = ($baseName -match '(?i)\bS\d{1,2}\b') -or ($baseName -match '(?i)\bSeason[\s\._-]*\d{1,2}\b') -or ($baseName -match '(?i)\bSeries[\s\._-]*\d{1,2}\b')
+    $isEpisodePattern = ($baseName -match '(?i)\bS\d{1,2}E\d{1,2}\b') -or ($baseName -match '(?i)\b\d{1,2}x\d{1,2}\b')
+    $hasCompleteKeyword = ($baseName -match '(?i)\bComplete\b') -or ($baseName -match '(?i)\bFull[\s\._-]*Season\b')
+    $hasYear = ($baseName -match '(19|20)\d{2}')
+    $hasQualityTag = ($baseName -match '(?i)BluRay|Remux|WEB-DL|HDTV|1080p|720p|2160p|4K')
+
+    # Size-based heuristics for archives (rough estimates based on typical compression)
+    # Single movie (1080p BluRay): 8-25 GB, 4K: 25-70+ GB
+    # TV Season (10-24 episodes @ 720p-1080p): 15-80+ GB
+    $looksMovieBySizeSmall  = ($sizeGB -ge 3 -and $sizeGB -le 15)    # Single compressed movie
+    $looksMovieBySizeMedium = ($sizeGB -gt 15 -and $sizeGB -le 35)   # Higher quality movie
+    $looksMovieBySizeLarge  = ($sizeGB -gt 35 -and $sizeGB -le 70)   # 4K movie or collection
+    $looksSeasonBySize      = ($sizeGB -gt 8)                        # TV seasons typically 8GB+ for even short seasons
+    $looksLargeSeasonBySize = ($sizeGB -gt 25)                       # Full seasons of 10+ episodes
+
+    # Scores
+    $scoreMovie = 0
+    $scoreSeason = 0
+
+    # Path scoring
+    if ($pathMovieHint) { $scoreMovie += 40 }
+    if ($pathTvHint)    { $scoreSeason += 40 }
+    if ($pathAnimeHint) { $scoreSeason += 30 }
+    if ($inSeasonFolder){ $scoreSeason += 35 }
+
+    # Naming pattern scoring (strongest signals)
+    if ($isSeasonPattern)    { $scoreSeason += 60 }
+    if ($hasCompleteKeyword) { $scoreSeason += 30 }
+    if ($isEpisodePattern)   { $scoreSeason += 20 }  # Single episode archive less common but boost season slightly
+    
+    # Size-based scoring with context
+    if ($looksMovieBySizeSmall) {
+        if ($isSeasonPattern) {
+            $scoreSeason += 25  # Small archive with season keyword = short season
+        } else {
+            $scoreMovie += 30   # Small archive without season clues = likely single movie
+        }
+    }
+    
+    if ($looksMovieBySizeMedium) {
+        if ($isSeasonPattern) {
+            $scoreSeason += 35  # Medium archive with season pattern = likely season
+        } else {
+            $scoreMovie += 25   # Could be movie or short season, slightly favor movie
+            $scoreSeason += 15
+        }
+    }
+    
+    if ($looksMovieBySizeLarge) {
+        # Large archives need strong contextual signals
+        if ($isSeasonPattern -or $hasCompleteKeyword) {
+            $scoreSeason += 40  # Large + season markers = definitely a season
+        } else {
+            $scoreMovie += 20   # Large with no season clues = could be 4K movie or collection
+            $scoreSeason += 20  # But also could be a season
+        }
+    }
+    
+    if ($looksLargeSeasonBySize) {
+        $scoreSeason += 30  # Very large archives more likely to be full TV seasons
+    }
+
+    # Year + quality tags slightly favor movies but not strongly
+    if ($hasYear -and $hasQualityTag -and -not $isSeasonPattern) { 
+        $scoreMovie += 15 
+    }
+
+    # Decide category
+    $cat = "Archive_Unknown"
+    $confidence = 50
+
+    if ($scoreMovie -gt $scoreSeason -and $scoreMovie -ge 40) {
+        $cat = "Movie_Archive"
+        $gap = $scoreMovie - $scoreSeason
+        $confidence = [math]::Min(100, $scoreMovie + [math]::Ceiling($gap / 2))
+    }
+    elseif ($scoreSeason -gt $scoreMovie -and $scoreSeason -ge 40) {
+        $cat = "TV_SeasonBundle"
+        $gap = $scoreSeason - $scoreMovie
+        $confidence = [math]::Min(100, $scoreSeason + [math]::Ceiling($gap / 2))
+    }
+    elseif ([math]::Abs($scoreMovie - $scoreSeason) -le 10 -and ($scoreMovie -ge 30 -or $scoreSeason -ge 30)) {
+        $cat = "Archive_Ambiguous"
+        $confidence = 50
+    }
+
+    # Extract show/season info if detected
+    $showGuess = ""
+    $seasonCode = ""
+    $seasonInfo = SeasonInfoFromName $baseName
+    if ($seasonInfo.Matched) {
+        $showGuess = $seasonInfo.Show
+        $seasonCode = $seasonInfo.Season
+    }
+
+    return @{ 
+        Category=$cat
+        Confidence=[int]$confidence
+        ScoreMovie=$scoreMovie
+        ScoreSeason=$scoreSeason
+        ShowGuess=$showGuess
+        SeasonGuess=$seasonCode
+    }
+}
+
 function ScoreAndClassifyVideo($fileInfo, $durMin, $w, $h, $inSeasonFolder) {
     $fullPath = $fileInfo.FullName
     $baseName = $fileInfo.BaseName
@@ -139,11 +302,16 @@ function ScoreAndClassifyVideo($fileInfo, $durMin, $w, $h, $inSeasonFolder) {
     # Path hints
     $pathMovieHint = ($p -match "\\movies\\") -or ($p -match "\\film\\") -or ($p -match "\\blu-?ray\\") -or ($p -match "\\dvds\\")
     $pathTvHint    = ($p -match "\\tv\\") -or ($p -match "\\tv shows\\") -or ($p -match "\\series\\") -or ($p -match "\\season")
-    $pathClipHint  = ($p -match "\\clips\\") -or ($p -match "\\obs\\") -or ($p -match "\\recordings\\") -or ($p -match "\\captures\\") -or ($p -match "\\youtube\\") -or ($p -match "\\twitch\\") -or ($p -match "\\gameplay\\") -or ($p -match "\\stream")
+    $pathClipEntertainmentHint = ($p -match "\\clips\\") -or ($p -match "\\highlights\\") -or ($p -match "\\best[\s_\.-]*moments?\\") -or ($p -match "\\movie[\s_\.-]*gold\\") -or ($p -match "\\scenes\\") -or ($p -match "\\montage\\")
+    $pathPersonalCaptureHint = ($p -match "\\obs\\") -or ($p -match "\\recordings\\") -or ($p -match "\\captures\\") -or ($p -match "\\gameplay\\") -or ($p -match "\\replays\\") -or ($p -match "\\raw[\s_\.-]*footage\\") -or ($p -match "\\shadowplay\\") -or ($p -match "\\stream")
     $pathAnimeHint = ($p -match "\\anime\\") -or ($fullPath -match '\[\w+-\w+\]') -or ($p -match "\\hentai\\")  # folder named anime, or [SubGroup] naming, or hentai folder
 
     # Filename hints
     $isEpisodePattern = ($baseName -match '(?i)\bS\d{1,2}E\d{1,2}\b') -or ($baseName -match '(?i)\b\d{1,2}x\d{1,2}\b') -or ($baseName -match '(?i)\bEp(?:isode)?[\s\._-]*\d{1,2}\b')
+    # Entertainment clip keywords - movie/TV scenes, deleted scenes, etc.
+    $hasClipKeyword = ($baseName -match '(?i)\bclip(?:s)?\b') -or ($baseName -match '(?i)\bhighlight(?:s)?\b') -or ($baseName -match '(?i)\bbest[\s_\.-]*moments?\b') -or ($baseName -match '(?i)\bmovie[\s_\.-]*gold\b') -or ($baseName -match '(?i)\bscene(?:s)?\b') -or ($baseName -match '(?i)\bmontage\b') -or ($baseName -match '(?i)\bcompilation\b') -or ($baseName -match '(?i)\bdeleted\b') -or ($baseName -match '(?i)\bextended\b') -or ($baseName -match '(?i)movieclips?')
+    # Personal capture keywords - raw footage, stock, dev work, streams
+    $hasPersonalCaptureKeyword = ($baseName -match '(?i)\bobs\b') -or ($baseName -match '(?i)\bcapture(?:s|d)?\b') -or ($baseName -match '(?i)\brecord(?:ing|ings)\b') -or ($baseName -match '(?i)[\s\._-]raw[\s\._-]?') -or ($baseName -match '(?i)^raw[\s\._-]') -or ($baseName -match '(?i)\bfootage\b') -or ($baseName -match '(?i)\bgameplay\b') -or ($baseName -match '(?i)\breplay\b') -or ($baseName -match '(?i)\bshadowplay\b') -or ($baseName -match '(?i)\bstock\b') -or ($baseName -match '(?i)\bstream(?:ing)?\b') -or ($baseName -match '(?i)\bdev[\s\._-]*diary\b') -or ($baseName -match '(?i)\bunfollow\b')
     $hasYear = ($baseName -match '(19|20)\d{2}')
     $hasQualityTag = ($baseName -match '(?i)BluRay|Remux|WEB-DL|HDTV')
 
@@ -151,24 +319,49 @@ function ScoreAndClassifyVideo($fileInfo, $durMin, $w, $h, $inSeasonFolder) {
     $looksMovieByDur = ($durMin -ge 70)
     $looksTvByDur    = ($durMin -ge 18 -and $durMin -le 70)
     $looksClipByDur  = ($durMin -gt 0 -and $durMin -lt 18)
+    $looksClipishByDur = ($durMin -gt 0 -and $durMin -le 45)
     $looksShortFilmByDur = ($durMin -ge 30 -and $durMin -lt 70)  # short films: 30-70 min
 
     # Scores
     $scoreMovie = 0
     $scoreTv = 0
+    $scoreClip = 0
     $scorePersonal = 0
 
     if ($pathMovieHint) { $scoreMovie += 35 }
     if ($pathTvHint)    { $scoreTv += 35 }
     if ($pathAnimeHint) { $scoreTv += 25 }  # anime folders lean toward TV but not as strongly as TV path
-    if ($pathClipHint)  { $scorePersonal += 35 }
+    if ($pathClipEntertainmentHint) { $scoreClip += 35 }
+    if ($pathPersonalCaptureHint)   { $scorePersonal += 35 }
+    if ($hasClipKeyword)            { $scoreClip += 40 }  # Strong signal for entertainment clips
+    if ($hasPersonalCaptureKeyword) { $scorePersonal += 45 }  # Very strong signal for personal content
 
     if ($isEpisodePattern) { $scoreTv += 55 }
     if ($inSeasonFolder)   { $scoreTv += 35 }   # big boost if folder screams "season"
 
     if ($looksMovieByDur) { $scoreMovie += 35 }
     if ($looksTvByDur)    { $scoreTv += 25 }
-    if ($looksClipByDur)  { $scorePersonal += 25 }
+    
+    # Duration scoring with mutual exclusivity logic
+    if ($looksClipByDur)  {
+        # If it clearly has personal indicators, don't boost Clip
+        if ($hasPersonalCaptureKeyword -or $pathPersonalCaptureHint) {
+            $scorePersonal += 25
+        }
+        # If it clearly has entertainment clip indicators, don't boost Personal
+        elseif ($hasClipKeyword -or $pathClipEntertainmentHint) {
+            $scoreClip += 25
+        }
+        # Otherwise, could be either
+        else {
+            $scoreClip += 15
+            $scorePersonal += 15
+        }
+    }
+    
+    if ($looksClipishByDur -and $hasClipKeyword) { $scoreClip += 15 }
+    if ($looksClipishByDur -and ($pathPersonalCaptureHint -or $hasPersonalCaptureKeyword)) { $scorePersonal += 10 }
+    if ($pathClipEntertainmentHint -and $hasYear -and -not $isEpisodePattern) { $scoreClip += 10 }
 
     # Short film boost: if it has year + quality tag + is in short film duration range, boost as likely short film (not episode)
     if ($looksShortFilmByDur -and $hasYear -and $hasQualityTag) { 
@@ -184,6 +377,7 @@ function ScoreAndClassifyVideo($fileInfo, $durMin, $w, $h, $inSeasonFolder) {
     $scores = @(
         [pscustomobject]@{ Cat="Movie"; Score=$scoreMovie },
         [pscustomobject]@{ Cat="TV_Episode"; Score=$scoreTv },
+        [pscustomobject]@{ Cat="Clip"; Score=$scoreClip },
         [pscustomobject]@{ Cat="Personal"; Score=$scorePersonal }
     ) | Sort-Object Score -Descending
 
@@ -195,7 +389,7 @@ function ScoreAndClassifyVideo($fileInfo, $durMin, $w, $h, $inSeasonFolder) {
     $cat = $top.Cat
     if ($top.Score -lt 40 -or $gap -lt 12) { $cat = "Unknown" }
 
-    return @{ Category=$cat; Confidence=[int]$confidence; ScoreMovie=$scoreMovie; ScoreTV=$scoreTv; ScorePersonal=$scorePersonal }
+    return @{ Category=$cat; Confidence=[int]$confidence; ScoreMovie=$scoreMovie; ScoreTV=$scoreTv; ScoreClip=$scoreClip; ScorePersonal=$scorePersonal }
 }
 
 Write-Host "Scanning $root ..." -ForegroundColor Cyan
@@ -274,10 +468,13 @@ $processed = 0
 $ffprobeFailed = 0
 
 $movieCount = 0
+$movieArchiveCount = 0
 $tvEpisodeCount = 0
 $tvBundleCount = 0
+$clipCount = 0
 $personalCount = 0
 $unknownCount = 0
+$ambiguousCount = 0
 
 # Helper to update progress
 function Update-ScanProgress($currentName) {
@@ -286,7 +483,7 @@ function Update-ScanProgress($currentName) {
     $rate = if ($elapsed.TotalSeconds -gt 0) { $processed / $elapsed.TotalSeconds } else { 0 }
     $etaSec = if ($rate -gt 0) { [int](($totalItems - $processed) / $rate) } else { 0 }
     $eta = (New-TimeSpan -Seconds $etaSec)
-    $statusLine = "Processed $processed/$totalItems | Movies:$movieCount TVeps:$tvEpisodeCount TVbundles:$tvBundleCount Personal:$personalCount Unknown:$unknownCount | ffprobe fails:$ffprobeFailed | ETA: {0:hh\:mm\:ss}" -f $eta
+    $statusLine = "Processed $processed/$totalItems | Movies:$movieCount M-Archives:$movieArchiveCount TVeps:$tvEpisodeCount TVbundles:$tvBundleCount Clips:$clipCount Personal:$personalCount Unknown:$unknownCount Ambig:$ambiguousCount | ffprobe fails:$ffprobeFailed | ETA: {0:hh\:mm\:ss}" -f $eta
 
     if ($showPathInProgress) {
         # Truncate filename if too long to prevent display corruption
@@ -329,9 +526,16 @@ foreach ($path in $videoPaths) {
 
     $class = ScoreAndClassifyVideo $fi $durMin $w $h $inSeasonFolder
 
+    # Extract episode info for grouping
+    $episodeInfo = EpisodeInfoFromName $fi.BaseName
+    $showName = if ($episodeInfo.Matched) { $episodeInfo.Show } else { "" }
+    $seasonNum = if ($episodeInfo.Matched) { $episodeInfo.Season } else { "" }
+    $episodeNum = if ($episodeInfo.Matched) { $episodeInfo.Episode } else { "" }
+
     switch ($class.Category) {
         "Movie"      { $movieCount++ }
         "TV_Episode" { $tvEpisodeCount++ }
+        "Clip"       { $clipCount++ }
         "Personal"   { $personalCount++ }
         default      { $unknownCount++ }
     }
@@ -351,8 +555,15 @@ foreach ($path in $videoPaths) {
         Confidence     = $class.Confidence
         ScoreMovie     = $class.ScoreMovie
         ScoreTV        = $class.ScoreTV
+        ScoreClip      = $class.ScoreClip
         ScorePersonal  = $class.ScorePersonal
         InSeasonFolder = $inSeasonFolder
+        ShowName       = $showName
+        SeasonNum      = $seasonNum
+        EpisodeNum     = $episodeNum
+        GroupID        = ""
+        GroupType      = ""
+        DuplicateOf    = ""
     }) | Out-Null
 
     Update-ScanProgress $fi.Name
@@ -366,30 +577,17 @@ foreach ($path in $archivePaths) {
     try { $fi = Get-Item -LiteralPath $path -ErrorAction Stop } catch { $fi = $null }
     if (-not $fi) { $unknownCount++; Update-ScanProgress (Split-Path $path -Leaf); continue }
 
-    $base = $fi.BaseName
-    $sn = SeasonInfoFromName $base
+    $dir = Split-Path $path -Parent
+    $inSeasonFolder = $seasonFolderLookup.ContainsKey($dir)
 
-    $cat = "Archive_Unknown"
-    $conf = 40
-    $show = ""
-    $season = ""
+    # Use the new classification function
+    $class = ScoreAndClassifyArchive $fi $inSeasonFolder
 
-    if ($sn.Matched) {
-        $cat = "TV_SeasonBundle"
-        $conf = 95
-        $show = $sn.Show
-        $season = $sn.Season
-        $tvBundleCount++
-    } else {
-        # If it lives inside a detected season folder tree, treat as likely TV bundle
-        $dirLower = $fi.DirectoryName.ToLower()
-        if ($dirLower -match "\\tv\\|\\tv shows\\|\\series\\|\\season") {
-            $cat = "TV_SeasonBundle_Possible"
-            $conf = 70
-            $tvBundleCount++
-        } else {
-            $unknownCount++
-        }
+    switch ($class.Category) {
+        "Movie_Archive"      { $movieArchiveCount++ }
+        "TV_SeasonBundle"    { $tvBundleCount++ }
+        "Archive_Ambiguous"  { $ambiguousCount++ }
+        default              { $unknownCount++ }
     }
 
     $rows.Add([pscustomobject]@{
@@ -403,11 +601,19 @@ foreach ($path in $archivePaths) {
         Height         = 0
         Created        = $fi.CreationTime
         Modified       = $fi.LastWriteTime
-        AutoCategory   = $cat
-        Confidence     = [int]$conf
-        ShowGuess      = $show
-        SeasonGuess    = $season
-        InSeasonFolder = $false
+        AutoCategory   = $class.Category
+        Confidence     = $class.Confidence
+        ScoreMovie     = $class.ScoreMovie
+        ScoreSeason    = $class.ScoreSeason
+        ShowGuess      = $class.ShowGuess
+        SeasonGuess    = $class.SeasonGuess
+        InSeasonFolder = $inSeasonFolder
+        ShowName       = $class.ShowGuess
+        SeasonNum      = $class.SeasonGuess
+        EpisodeNum     = ""
+        GroupID        = ""
+        GroupType      = ""
+        DuplicateOf    = ""
     }) | Out-Null
 
     Update-ScanProgress $fi.Name
@@ -415,8 +621,123 @@ foreach ($path in $archivePaths) {
 
 Write-Progress -Activity "Scanning $root media" -Completed
 
+# ===== GROUPING PHASE =====
+Write-Host ""
+Write-Host "Analyzing groups and duplicates..." -ForegroundColor Cyan
+
+$groupID = 1
+$groupRows = New-Object System.Collections.Generic.List[Object]
+$dupeRows = New-Object System.Collections.Generic.List[Object]
+$virtualBundleCount = 0
+
+# 1) Group loose video episodes into virtual season bundles
+$videoFiles = $rows | Where-Object { $_.ItemType -eq "VideoFile" -and $_.ShowName -and $_.SeasonNum -and $_.EpisodeNum }
+$grouped = $videoFiles | Group-Object { "$($_.ShowName)|$($_.SeasonNum)" }
+
+foreach ($g in $grouped) {
+    $episodes = @($g.Group)
+    if ($episodes.Count -ge 3) {  # 3+ episodes = likely a season bundle
+        $parts = $g.Name -split '\|'
+        $showName = $parts[0]
+        $seasonNum = $parts[1]
+        
+        $totalSizeGB = ($episodes | Measure-Object -Property SizeGB -Sum).Sum
+        $totalDurMin = ($episodes | Measure-Object -Property DurationMin -Sum).Sum
+        $episodeList = ($episodes | Sort-Object EpisodeNum | ForEach-Object { $_.EpisodeNum }) -join ", "
+        
+        # Assign group ID to all episodes in this virtual bundle
+        $currentGroupID = "VB-$groupID"
+        foreach ($ep in $episodes) {
+            $ep.GroupID = $currentGroupID
+            $ep.GroupType = "Virtual_SeasonBundle"
+        }
+        
+        $groupRows.Add([pscustomobject]@{
+            GroupID        = $currentGroupID
+            GroupType      = "Virtual_SeasonBundle"
+            ShowName       = $showName
+            SeasonNum      = $seasonNum
+            FileCount      = $episodes.Count
+            TotalSizeGB    = [math]::Round($totalSizeGB, 2)
+            TotalDurMin    = [math]::Round($totalDurMin, 2)
+            Episodes       = $episodeList
+            Representative = $episodes[0].FullPath
+        }) | Out-Null
+        
+        $groupID++
+        $virtualBundleCount++
+    }
+}
+
+# 2) Detect duplicates: Archives that match extracted video groups
+$archives = $rows | Where-Object { $_.ItemType -eq "Archive" -and $_.ShowName -and $_.SeasonNum }
+
+foreach ($arc in $archives) {
+    # Normalize show name for fuzzy matching (remove punctuation, extra spaces)
+    $arcShowNorm = $arc.ShowName -replace '[^\w\s]', '' -replace '\s+', ' '
+    $arcShowNorm = $arcShowNorm.Trim().ToLower()
+    
+    # Look for video episodes with matching show + season
+    $matchingEpisodes = $videoFiles | Where-Object {
+        $_.SeasonNum -eq $arc.SeasonNum -and
+        (($_.ShowName -replace '[^\w\s]', '' -replace '\s+', ' ').Trim().ToLower()) -eq $arcShowNorm
+    }
+    
+    if ($matchingEpisodes) {
+        $epCount = @($matchingEpisodes).Count
+        $epSizeGB = ($matchingEpisodes | Measure-Object -Property SizeGB -Sum).Sum
+        $arcSizeGB = $arc.SizeGB
+        
+        # Consider it a duplicate if:
+        # - Multiple episodes exist
+        # - Archive size is within reasonable range of extracted episodes (50% to 200%)
+        $sizeRatio = if ($epSizeGB -gt 0) { $arcSizeGB / $epSizeGB } else { 0 }
+        
+        if ($epCount -ge 3 -and $sizeRatio -ge 0.3 -and $sizeRatio -le 2.0) {
+            $dupeGroupID = "DUPE-$groupID"
+            
+            # Mark archive as duplicate
+            $arc.GroupID = $dupeGroupID
+            $arc.GroupType = "Duplicate_Archive"
+            $arc.DuplicateOf = "Extracted_In_Folder"
+            
+            # Mark episodes as having an archive duplicate
+            foreach ($ep in $matchingEpisodes) {
+                if (-not $ep.GroupType) { 
+                    $ep.GroupType = "Has_Archive_Duplicate" 
+                }
+                $ep.DuplicateOf = $arc.FileName
+            }
+            
+            $dupeRows.Add([pscustomobject]@{
+                GroupID          = $dupeGroupID
+                ArchiveFile      = $arc.FileName
+                ArchiveSizeGB    = $arcSizeGB
+                ExtractedCount   = $epCount
+                ExtractedSizeGB  = [math]::Round($epSizeGB, 2)
+                SizeRatio        = [math]::Round($sizeRatio, 2)
+                ShowName         = $arc.ShowName
+                SeasonNum        = $arc.SeasonNum
+                ArchivePath      = $arc.FullPath
+            }) | Out-Null
+            
+            $groupID++
+        }
+    }
+}
+
+Write-Host ("Virtual season bundles detected: {0}" -f $virtualBundleCount) -ForegroundColor DarkCyan
+Write-Host ("Archive/Extracted duplicates found: {0}" -f $dupeRows.Count) -ForegroundColor DarkCyan
+
+# Export all CSVs
 $rows | Export-Csv $outItemsCsv -NoTypeInformation
 $seasonFolderRows | Export-Csv $outSeasonsCsv -NoTypeInformation
+if ($groupRows.Count -gt 0) {
+    $groupRows | Export-Csv $outGroupsCsv -NoTypeInformation
+}
+if ($dupeRows.Count -gt 0) {
+    $dupeRows | Export-Csv $outDupesCsv -NoTypeInformation
+}
 
 # Write error log to file
 if ($errorLog.Count -gt 0) {
@@ -428,7 +749,13 @@ Write-Host ""
 Write-Host "Done." -ForegroundColor Green
 Write-Host ("Wrote {0} rows -> {1}" -f $rows.Count, $outItemsCsv) -ForegroundColor Green
 Write-Host ("Wrote {0} season folders -> {1}" -f $seasonFolderRows.Count, $outSeasonsCsv) -ForegroundColor Green
-Write-Host ("Totals: Movies={0} | TV_Episodes={1} | TV_Bundles={2} | Personal={3} | Unknown={4}" -f $movieCount,$tvEpisodeCount,$tvBundleCount,$personalCount,$unknownCount)
+if ($groupRows.Count -gt 0) {
+    Write-Host ("Wrote {0} virtual bundles -> {1}" -f $groupRows.Count, $outGroupsCsv) -ForegroundColor Green
+}
+if ($dupeRows.Count -gt 0) {
+    Write-Host ("Wrote {0} duplicate groups -> {1}" -f $dupeRows.Count, $outDupesCsv) -ForegroundColor Green
+}
+Write-Host ("Totals: Movies={0} | MovieArchives={1} | TV_Episodes={2} | TV_Bundles={3} | Virtual_Bundles={4} | Clips={5} | Personal={6} | Ambiguous={7} | Unknown={8}" -f $movieCount,$movieArchiveCount,$tvEpisodeCount,$tvBundleCount,$virtualBundleCount,$clipCount,$personalCount,$ambiguousCount,$unknownCount)
 Write-Host ("ffprobe failures: {0}" -f $ffprobeFailed)
 Write-Host ("Elapsed: {0:hh\:mm\:ss}" -f $totalTime)
 

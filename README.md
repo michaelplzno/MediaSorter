@@ -19,9 +19,12 @@ Perfect for creating offline media libraries on USB drives for non-smart TVs, or
 ## Features
 
 - 🎬 **Automatic classification** of movies, TV episodes, personal recordings, and archives
+- � **Archive analysis** with size-based heuristics to identify movie vs TV season bundles
+- 🔗 **Smart grouping** of loose episodes into virtual season bundles (e.g., multiple South Park episodes → Season 1)
+- 🔍 **Duplicate detection** between archives and extracted files to avoid double-counting
 - 📊 **CSV export** for easy filtering, planning, and analysis
-- 🔍 **Metadata extraction** using ffprobe (duration, resolution, file size)
-- 📦 **Archive support** for `.tar` season bundles
+- 🎯 **Metadata extraction** using ffprobe (duration, resolution, file size)
+- 🏷️ **Episode parsing** extracts show name, season, and episode numbers from filenames
 - 🔧 **Customizable** classification rules and heuristics
 - 📝 **Error logging** for problematic files
 
@@ -45,10 +48,12 @@ $OutputPrefix = "E"   # Prefix for output CSV files
 ```
 
 **Available scripts:**
+
 - `MediaSorter-Ddrive.ps1` - Example script (rename and configure for your drive)
 - `MediaSorter-XDrive.ps1` - Example script (rename and configure for your drive)
 
 **To customize:**
+
 1. Copy one of the example scripts or create your own
 2. Edit the `$SourceDrive` variable to point to your media drive
 3. Edit the `$OutputPrefix` variable to name your output files
@@ -65,6 +70,7 @@ cd e:\Dev\MediaSorter
 ```
 
 The script will:
+
 1. Recursively scan all video files and archives on your specified drive
 2. Extract metadata with ffprobe for each file
 3. Apply classification heuristics
@@ -74,35 +80,55 @@ The script will:
 
 After scanning completes, you'll find CSV files in the project directory:
 
-- `{Prefix}_media_items.csv` - All media items with metadata and classification
-- `{Prefix}_media_seasons_detected.csv` - Detected TV season information
-- `{Prefix}_media_enriched.csv` - Enhanced classification results
+- `{Prefix}_media_items.csv` - All media items with metadata, classification, and grouping info
+- `{Prefix}_media_seasons_detected.csv` - Detected TV season folders
+- `{Prefix}_media_groups.csv` - Virtual season bundles (loose episodes grouped together)
+- `{Prefix}_media_duplicates.csv` - Detected duplicates between archives and extracted files
 
 ## Classification Logic
 
 MediaSorter uses intelligent heuristics to classify media:
 
 ### Movies
+
 - Single large video files (typically >75 minutes)
 - Common naming patterns with year indicators
 - Classified as `Movie`
 
 ### TV Episodes
+
 - Files with episode patterns: `S01E01`, `1x01`, `Episode 01`, `Ep01`
 - Duration typically 18-75 minutes
 - Classified as `TV_Episode`
 
 ### TV Season Archives
-- `.tar` files with season indicators in the filename
-- Classified as `TV_SeasonBundle`
+
+- `.tar`, `.zip`, `.7z` and other archive files analyzed by size and naming patterns
+- Size heuristics: 3-15 GB (likely movie), 25+ GB (likely full TV season)
+- Season indicators: `S01`, `Season 1`, `Complete` keywords
+- Classified as `TV_SeasonBundle`, `Movie_Archive`, or `Archive_Ambiguous`
+
+### Virtual Season Bundles
+
+- Loose video episodes (3+ files) automatically grouped by show + season
+- Example: `South.Park.S01E01.mkv`, `South.Park.S01E02.mkv`, etc. → Virtual Season 1 bundle
+- Enables accurate season-level statistics even without folder organization
+
+### Duplicate Detection
+
+- Compares archives with extracted video files
+- Matches by show name, season number, and file size ratios
+- Marks potential duplicates to avoid double-counting storage
 
 ### Personal Content
+
 - Short clips (<20 minutes without TV/movie indicators)
 - Timestamp-based filenames (e.g., `2023-06-10 16-21-38.mp4`)
 - Located in capture/recording directories (e.g., OBS, SteamLibrary)
 - Classified as `Personal`
 
 ### Unknown
+
 - Files that don't match any classification rules
 - Review these manually and adjust classification rules as needed
 
@@ -111,6 +137,7 @@ MediaSorter uses intelligent heuristics to classify media:
 ### Classification Edge Cases
 
 Some items may be misclassified due to:
+
 - Non-standard naming conventions (anime, foreign media)
 - Ambiguous durations (short films, TV specials, cartoons)
 - Mixed content types in the same directory
@@ -120,6 +147,7 @@ Some items may be misclassified due to:
 ### FFprobe Failures
 
 Files showing zero values for duration/resolution may indicate:
+
 - Corrupted or zero-byte files
 - Unsupported or unusual formats
 - File permission issues
@@ -127,32 +155,31 @@ Files showing zero values for duration/resolution may indicate:
 
 **Solution:** Check error logs and verify file integrity. Consider excluding problematic directories.
 
-### Archive Detection
-
-- `.tar` movie bundles may not be reliably detected
-- Work in progress to improve archive classification beyond TV seasons
-
-
 ## Output Structure
 
 ### Generated CSV Files
 
 Each CSV contains the following key columns:
 
-| Column | Description |
-|--------|-------------|
-| FullPath | Absolute path to the file |
-| FileName | File name with extension |
-| Extension | File extension (.mkv, .mp4, .tar, etc.) |
-| SizeGB | File size in gigabytes |
-| Duration | Runtime in minutes (video files only) |
-| Width | Video width in pixels |
-| Height | Video height in pixels |
-| Kind | Classification type (Movie, TV_Episode, Personal, etc.) |
-| Show | TV show name (if applicable) |
-| Season | Season number (if applicable) |
-| Episode | Episode number (if applicable) |
-
+| Column       | Description                                               |
+| ------------ | --------------------------------------------------------- |
+| ItemType     | Type: VideoFile or Archive                                |
+| FullPath     | Absolute path to the file                                 |
+| FileName     | File name with extension                                  |
+| Extension    | File extension (.mkv, .mp4, .tar, etc.)                   |
+| SizeGB       | File size in gigabytes                                    |
+| DurationMin  | Runtime in minutes (video files only)                     |
+| Width        | Video width in pixels                                     |
+| Height       | Video height in pixels                                    |
+| AutoCategory | Classification (Movie, TV_Episode, TV_SeasonBundle, etc.) |
+| Confidence   | Classification confidence score (0-100)                   |
+| ShowName     | Extracted TV show name                                    |
+| SeasonNum    | Season number (S01, S02, etc.)                            |
+| EpisodeNum   | Episode number (E01, E02, etc.)                           |
+| GroupID      | ID linking related files (virtual bundles, duplicates)    |
+| GroupType    | Type: Virtual_SeasonBundle, Duplicate_Archive, etc.       |
+| DuplicateOf  | Reference to duplicate file if detected                   |
+| Episode      | Episode number (if applicable)                            |
 
 ## Usage Examples
 
@@ -185,20 +212,23 @@ $unknown = Import-Csv "E_media_items.csv" | Where-Object { $_.Kind -eq "Unknown"
 ### Filter with Excel
 
 Open the CSV files in Excel or Google Sheets and use filters to:
+
 - Sort by Kind, Show, Duration, or Size
 - Create pivot tables for library statistics
 - Plan what content to include on USB drives
-
 
 ## Building a USB Media Library
 
 Once you've scanned and reviewed your media inventory:
 
 ### 1. Filter Content
+
 Use the CSV files to decide which movies and shows to include on your USB drive.
 
 ### 2. Choose Filesystem
+
 Use **exFAT** format for your USB drive:
+
 - Supports files larger than 4GB (FAT32 limit)
 - Compatible with most modern TVs and media players
 - Works across Windows, Mac, and Linux
@@ -261,34 +291,43 @@ Please submit issues and pull requests on GitHub.
 ## Troubleshooting
 
 ### Script doesn't find ffprobe
+
 **Error:** `The term 'ffprobe' is not recognized...`
 
-**Solution:** 
+**Solution:**
+
 1. Install FFmpeg from https://ffmpeg.org/download.html
 2. Add FFmpeg bin directory to your system PATH
 3. Restart PowerShell and run `ffprobe -version` to verify
 
 ### Permission errors during scan
+
 **Error:** `Access to the path '...' is denied`
 
 **Solution:**
+
 - Run PowerShell as Administrator
 - Check file/folder permissions on source drive
 - Exclude system directories that require special permissions
 
 ### Script runs very slowly
+
 **Causes:**
+
 - Large libraries (10,000+ files) take time to process
 - Network drives are slower than local drives
 - ffprobe extraction is CPU-intensive
 
 **Solutions:**
+
 - Be patient - first scan is always slowest
 - Exclude directories you don't need to scan
 - Run overnight for very large libraries
 
 ### Classification is inaccurate
+
 **Solution:**
+
 - Review the CSV output to identify patterns
 - Modify the classification rules in the script
 - Submit an issue with examples for community help
@@ -310,10 +349,10 @@ If you encounter issues:
 ## Acknowledgments
 
 Built with PowerShell and ffprobe for media enthusiasts who want to:
+
 - Organize large personal media collections
 - Create offline media libraries for TVs without smart features
 - Preserve physical media collections digitally
 - Share curated content with family and friends
 
 Perfect for cord-cutters, media archivists, and anyone who values owning their media library.
-
