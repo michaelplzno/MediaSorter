@@ -22,16 +22,24 @@ $archiveEndings = @(".tar",".tgz",".tar.gz",".tar.xz",".tar.zst",".zip",".7z",".
 $logEvery = 50
 $showPathInProgress = $true
 
-$ffprobeLog = "ffprobe_failures.log"
-Remove-Item $ffprobeLog -ErrorAction SilentlyContinue
+# Create logs folder if it doesn't exist
+$logsFolder = "logs"
+if (-not (Test-Path $logsFolder)) {
+    New-Item -ItemType Directory -Path $logsFolder | Out-Null
+}
+
+$ffprobeLog = Join-Path $logsFolder "ffprobe_failures.log"
+
+# Collect errors in memory instead of writing to terminal during execution
+$errorLog = New-Object System.Collections.Generic.List[String]
 
 function Get-FfprobeInfo($path) {
     try {
-        # -v error shows failures; 2>&1 captures them so we can log
-        $jsonOrError = & ffprobe -v error -print_format json -show_streams -show_format "$path" | Out-String
+        # -v quiet suppresses error messages to prevent terminal output during progress bar
+        $jsonOrError = & ffprobe -v quiet -print_format json -show_streams -show_format "$path" 2>$null | Out-String
 
         if (-not $jsonOrError) {
-            Add-Content $ffprobeLog "EMPTY OUTPUT :: $path"
+            $errorLog.Add("EMPTY OUTPUT :: $path")
             return $null
         }
 
@@ -39,7 +47,7 @@ function Get-FfprobeInfo($path) {
 
         # If it doesn't look like JSON, it's an error message
         if (-not $trim.StartsWith("{")) {
-            Add-Content $ffprobeLog ("ERROR :: {0} :: {1}" -f $path, $trim.Replace("`r"," ").Replace("`n"," "))
+            $errorLog.Add(("ERROR :: {0} :: {1}" -f $path, $trim.Replace("`r"," ").Replace("`n"," ")))
             return $null
         }
 
@@ -56,7 +64,7 @@ function Get-FfprobeInfo($path) {
 
         return @{ DurationSec = $dur; Width = $w; Height = $h }
     } catch {
-        Add-Content $ffprobeLog ("EXCEPTION :: {0} :: {1}" -f $path, $_.Exception.Message)
+        $errorLog.Add(("EXCEPTION :: {0} :: {1}" -f $path, $_.Exception.Message))
         return $null
     }
 }
@@ -374,6 +382,11 @@ Write-Progress -Activity "Scanning $root media" -Completed
 $rows | Export-Csv $outItemsCsv -NoTypeInformation
 $seasonFolderRows | Export-Csv $outSeasonsCsv -NoTypeInformation
 
+# Write error log to file
+if ($errorLog.Count -gt 0) {
+    $errorLog | Set-Content $ffprobeLog
+}
+
 $totalTime = (Get-Date) - $start
 Write-Host ""
 Write-Host "Done." -ForegroundColor Green
@@ -382,3 +395,13 @@ Write-Host ("Wrote {0} season folders -> {1}" -f $seasonFolderRows.Count, $outSe
 Write-Host ("Totals: Movies={0} | TV_Episodes={1} | TV_Bundles={2} | Personal={3} | Unknown={4}" -f $movieCount,$tvEpisodeCount,$tvBundleCount,$personalCount,$unknownCount)
 Write-Host ("ffprobe failures: {0}" -f $ffprobeFailed)
 Write-Host ("Elapsed: {0:hh\:mm\:ss}" -f $totalTime)
+
+# Display errors at the end, after progress bar is cleared
+if ($errorLog.Count -gt 0) {
+    Write-Host ""
+    Write-Host "=== ERRORS (also saved to $ffprobeLog) ===" -ForegroundColor Yellow
+    foreach ($err in $errorLog) {
+        Write-Host $err -ForegroundColor Yellow
+    }
+    Write-Host "=== END ERRORS ===" -ForegroundColor Yellow
+}
