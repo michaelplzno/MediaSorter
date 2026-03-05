@@ -1,263 +1,318 @@
 <!-- @format -->
 
-# Media USB Project
+# MediaSorter
 
-## Executive summary
+A PowerShell-based tool for scanning, classifying, and organizing large media libraries into structured formats suitable for USB media players, TV playback, and cloud backup.
 
-Goal: build a **simple “plug into TV and watch” USB flash drive** for your parents that contains a curated set of movies and TV shows from your archived Blu-rays/DVDs, without relying on streaming subscriptions.
+## Overview
 
-Your current media library on \*\*D:\*\* is a mix of:
+MediaSorter helps you organize personal media collections by:
 
-- Full movies (single large files)
-- TV episodes (individual files and full seasons)
-- **Season bundles stored as `.tar` archives**
-- Personal/game capture clips and project videos mixed in
+- **Scanning** video files and archives recursively across drives
+- **Extracting** metadata (duration, resolution) using ffprobe
+- **Classifying** content automatically (Movies, TV Episodes, Personal recordings, etc.)
+- **Exporting** structured CSV inventories for planning and organization
+- **Supporting** multiple media types including `.tar` season bundles
 
-You wrote a PowerShell scanner that:
+Perfect for creating offline media libraries on USB drives for non-smart TVs, organizing archived Blu-ray/DVD collections, or preparing media for cloud backup.
 
-1. Recursively enumerates video files and archives on `D:\`
-2. Uses **ffprobe** to extract metadata (duration, width, height)
-3. Applies filename/path/duration heuristics to auto-classify items (Movie, TV_Episode, Personal, etc.)
-4. Exports a CSV “inventory” that you can use to plan what goes on the USB and what gets backed up to Google Drive
+## Features
 
-Early results were incorrect because `ffprobe` output was being broken by `--%` combined with `2>&1`, but that’s now fixed and durations/resolutions are populating for most files.
+- 🎬 **Automatic classification** of movies, TV episodes, personal recordings, and archives
+- 📊 **CSV export** for easy filtering, planning, and analysis
+- 🔍 **Metadata extraction** using ffprobe (duration, resolution, file size)
+- 📦 **Archive support** for `.tar` season bundles
+- 🔧 **Customizable** classification rules and heuristics
+- 📝 **Error logging** for problematic files
 
-Remaining improvements are mostly **classification tuning** and **handling tar season/movie bundles cleanly**.
+## Prerequisites
 
----
+- **Windows** with PowerShell 5.1 or later
+- **ffprobe** (part of FFmpeg) installed and available in PATH
+  - Download from: https://ffmpeg.org/download.html
+  - Verify installation: `ffprobe -version`
 
-# Current blockers / known issues
+## Getting Started
 
-### Classification edge cases
+### 1. Configuration
 
-Some items still hit `Unknown` even though they’re clearly Personal/TV/Short due to edge-case naming such as:
+Before running the scripts, configure your source drive paths. Each script file includes variables at the top that you'll need to customize:
 
-- Timestamp captures (example: `2023-06-10 16-21-38.mp4`)
-- Anime style naming (`Ep06` instead of `S01E06`)
-- Cartoons or short films (<20 minutes)
+```powershell
+# Example - Edit these values at the top of your script
+$SourceDrive = "E:\"  # Your media library drive letter
+$OutputPrefix = "E"   # Prefix for output CSV files
+```
 
-These need improved detection rules.
+**Available scripts:**
+- `MediaSorter-Ddrive.ps1` - Example script (rename and configure for your drive)
+- `MediaSorter-XDrive.ps1` - Example script (rename and configure for your drive)
 
----
+**To customize:**
+1. Copy one of the example scripts or create your own
+2. Edit the `$SourceDrive` variable to point to your media drive
+3. Edit the `$OutputPrefix` variable to name your output files
+4. Save the script with a descriptive name (e.g., `MediaSorter-MyDrive.ps1`)
 
-### ffprobe failures
+### 2. Run the Scanner
 
-Some rows show:
+```powershell
+# Navigate to the project directory
+cd e:\Dev\MediaSorter
 
-SizeGB = 0
-Duration = 0
-Width = 0
-Height = 0
+# Run your configured script
+.\MediaSorter-MyDrive.ps1
+```
 
-This likely indicates one of the following:
+The script will:
+1. Recursively scan all video files and archives on your specified drive
+2. Extract metadata with ffprobe for each file
+3. Apply classification heuristics
+4. Generate CSV output files
 
-- Zero-byte file
-- Corrupted file
-- Permission issue
-- ffprobe parsing failure
-- Bad path or symlink
+### 3. Review Output
 
-These files should be logged to `logs/ffprobe_failures.log` and reviewed manually.
+After scanning completes, you'll find CSV files in the project directory:
 
----
+- `{Prefix}_media_items.csv` - All media items with metadata and classification
+- `{Prefix}_media_seasons_detected.csv` - Detected TV season information
+- `{Prefix}_media_enriched.csv` - Enhanced classification results
 
-### Archive classification
+## Classification Logic
 
-`.tar` archives currently fall into two categories:
+MediaSorter uses intelligent heuristics to classify media:
 
-- TV season bundles
-- Movie archives
+### Movies
+- Single large video files (typically >75 minutes)
+- Common naming patterns with year indicators
+- Classified as `Movie`
 
-The scanner currently detects seasons but not movie bundles reliably.
+### TV Episodes
+- Files with episode patterns: `S01E01`, `1x01`, `Episode 01`, `Ep01`
+- Duration typically 18-75 minutes
+- Classified as `TV_Episode`
 
-We should classify archives as:
+### TV Season Archives
+- `.tar` files with season indicators in the filename
+- Classified as `TV_SeasonBundle`
 
-TV_SeasonBundle
-MovieBundle
-Archive_Unknown
+### Personal Content
+- Short clips (<20 minutes without TV/movie indicators)
+- Timestamp-based filenames (e.g., `2023-06-10 16-21-38.mp4`)
+- Located in capture/recording directories (e.g., OBS, SteamLibrary)
+- Classified as `Personal`
 
----
+### Unknown
+- Files that don't match any classification rules
+- Review these manually and adjust classification rules as needed
 
-# Next steps (project roadmap)
+## Known Issues & Limitations
 
-## 1. Move scripts into a VS Code project
+### Classification Edge Cases
 
-Suggested structure:
+Some items may be misclassified due to:
+- Non-standard naming conventions (anime, foreign media)
+- Ambiguous durations (short films, TV specials, cartoons)
+- Mixed content types in the same directory
 
-media-usb-project/
-│
-├─ src/
-│ ├─ ScanMedia.ps1
-│ ├─ Classify.ps1
-│ └─ BuildUsb.ps1
-│
-├─ data/
-│ ├─ media_inventory.csv
-│ └─ usb_plan.csv
-│
-├─ logs/
-│ └─ ffprobe_failures.log
-│
-├─ README.md
-└─ .vscode/
+**Solution:** Review CSV output and manually adjust classification rules in the script as needed.
 
-## 2. Harden the scanner
+### FFprobe Failures
 
-Improve the scanning stage by:
+Files showing zero values for duration/resolution may indicate:
+- Corrupted or zero-byte files
+- Unsupported or unusual formats
+- File permission issues
+- Bad paths or broken symlinks
 
-- Logging all ffprobe failures
-- Detecting zero-byte files
-- Adding warnings for corrupted or unreadable files
+**Solution:** Check error logs and verify file integrity. Consider excluding problematic directories.
 
-Example outputs:
+### Archive Detection
 
-logs/ffprobe_failures.log
-logs/bad_files.log
+- `.tar` movie bundles may not be reliably detected
+- Work in progress to improve archive classification beyond TV seasons
 
-## 3. Improve classification accuracy
 
-Enhance heuristics to correctly detect:
+## Output Structure
 
-### Personal recordings
+### Generated CSV Files
 
-Detect:
+Each CSV contains the following key columns:
 
-- Timestamp filenames
-- Capture directories
-- Short clips (<20 minutes)
+| Column | Description |
+|--------|-------------|
+| FullPath | Absolute path to the file |
+| FileName | File name with extension |
+| Extension | File extension (.mkv, .mp4, .tar, etc.) |
+| SizeGB | File size in gigabytes |
+| Duration | Runtime in minutes (video files only) |
+| Width | Video width in pixels |
+| Height | Video height in pixels |
+| Kind | Classification type (Movie, TV_Episode, Personal, etc.) |
+| Show | TV show name (if applicable) |
+| Season | Season number (if applicable) |
+| Episode | Episode number (if applicable) |
 
-Example paths:
 
-SteamLibrary
-Content/Movies
-OBS recordings
-Game captures
+## Usage Examples
 
-### TV episodes
+### Scan Multiple Drives
 
-Detect additional patterns:
+```powershell
+# Configure and run separate scripts for each drive
+.\MediaSorter-DriveE.ps1
+.\MediaSorter-DriveF.ps1
+.\MediaSorter-DriveG.ps1
+```
 
-S01E01
-1x01
-Ep01
-Episode 01
+### Analyze Results with PowerShell
 
-Duration heuristics:
+```powershell
+# Import and filter movies only
+$movies = Import-Csv "E_media_items.csv" | Where-Object { $_.Kind -eq "Movie" }
 
-18–75 minutes → likely TV
+# Find all Star Trek episodes
+$trek = Import-Csv "E_media_items.csv" | Where-Object { $_.Show -like "*Star Trek*" }
 
-### Movie shorts / cartoons
+# Calculate total library size in GB
+$total = (Import-Csv "E_media_items.csv" | Measure-Object -Property SizeGB -Sum).Sum
+Write-Host "Total library size: $total GB"
 
-Short films and cartoons often fall between:
+# Find all Unknown classifications for manual review
+$unknown = Import-Csv "E_media_items.csv" | Where-Object { $_.Kind -eq "Unknown" }
+```
 
-5–18 minutes
+### Filter with Excel
 
-Examples:
+Open the CSV files in Excel or Google Sheets and use filters to:
+- Sort by Kind, Show, Duration, or Size
+- Create pivot tables for library statistics
+- Plan what content to include on USB drives
 
-Looney Tunes
-MGM shorts
-Classic cartoons
 
-These can be classified as:
+## Building a USB Media Library
 
-Movie_Short
+Once you've scanned and reviewed your media inventory:
 
-### TV specials
+### 1. Filter Content
+Use the CSV files to decide which movies and shows to include on your USB drive.
 
-Items between:
+### 2. Choose Filesystem
+Use **exFAT** format for your USB drive:
+- Supports files larger than 4GB (FAT32 limit)
+- Compatible with most modern TVs and media players
+- Works across Windows, Mac, and Linux
 
-35–70 minutes
+### 3. Organize with a Clear Structure
 
-Without episode naming may be classified as:
-
-TV_Special
-
-## 4. Generate a USB plan CSV
-
-After scanning and classification, generate:
-
-data/usb_plan.csv
-
-Columns:
-
-Kind
-Title
-Year
-Show
-Season
-Episode
-SourcePath
-TargetPath
-
-This becomes the **copy blueprint** for the USB drive.
-
-## 5. Build the USB drive
-
-Recommended filesystem:
-
-exFAT
-
-Reason:
-
-- Handles large files (>4GB)
-- Compatible with most TVs
-
-### Suggested folder layout
-
+```
 USB_DRIVE/
-│
 ├─ Movies/
-│ ├─ Title (Year)/
-│ │ └─ Title (Year).mkv
-│
+│  └─ Movie Title (Year)/
+│     └─ Movie Title (Year).mkv
 ├─ TV/
-│ ├─ Show Name/
-│ │ ├─ Season 01/
-│ │ │ └─ Show Name - S01E01 - Episode Title.mkv
-│
+│  └─ Show Name/
+│     └─ Season 01/
+│        ├─ Show Name - S01E01.mkv
+│        └─ Show Name - S01E02.mkv
 └─ TV_Bundles/
-└─ Show Name/
-└─ Season 01.tar
+   └─ Show Name/
+      └─ Season 01.tar
+```
 
-### Copy process
+### 4. Copy Files Reliably
 
-Use `robocopy` for reliable transfer:
+Use `robocopy` for reliable file transfers:
 
-robocopy "D:\MediaSource" "E:\MediaUSB" /E /R:3 /W:5 /LOG:logs/usb_copy.log
+```powershell
+# Example: Copy from source to USB drive
+robocopy "E:\Media\Movies" "F:\Movies" /E /R:3 /W:5 /LOG:copy.log
 
-Advantages:
+# Parameters explained:
+# /E - Copy subdirectories including empty ones
+# /R:3 - Retry 3 times on failure
+# /W:5 - Wait 5 seconds between retries
+# /LOG - Create a log file
+```
 
-- Resumable
-- Handles large files well
-- Generates logs
+## Planned Features
 
-## 6. Backup to Google Drive
+- [ ] Enhanced classification with additional pattern detection
+- [ ] Support for more archive formats (zip, rar, 7z)
+- [ ] Automatic USB drive builder with one command
+- [ ] Cloud backup integration (Google Drive, OneDrive, Backblaze)
+- [ ] Duplicate detection and deduplication
+- [ ] Format conversion pipeline for TV compatibility
+- [ ] Web-based dashboard for inventory management
+- [ ] Multi-language filename pattern support
 
-After organizing and validating the media inventory, upload important originals or bundles to Google Drive.
+## Contributing
 
-Options:
+Contributions are welcome! Areas for improvement:
 
-### Simple
+- **Enhanced classification algorithms** - Better detection of edge cases
+- **Archive format support** - Beyond .tar files
+- **Multi-language patterns** - International media naming conventions
+- **Performance optimizations** - Large library processing
+- **TV compatibility testing** - Feedback on various TV brands/models
 
-Use **Google Drive for Desktop** and drag/drop.
+Please submit issues and pull requests on GitHub.
 
-### Advanced
+## Troubleshooting
 
-Use **rclone** for scripted uploads.
+### Script doesn't find ffprobe
+**Error:** `The term 'ffprobe' is not recognized...`
 
-Benefits of rclone:
+**Solution:** 
+1. Install FFmpeg from https://ffmpeg.org/download.html
+2. Add FFmpeg bin directory to your system PATH
+3. Restart PowerShell and run `ffprobe -version` to verify
 
-- Resumable uploads
-- Scheduled backups
-- CLI automation
+### Permission errors during scan
+**Error:** `Access to the path '...' is denied`
 
----
+**Solution:**
+- Run PowerShell as Administrator
+- Check file/folder permissions on source drive
+- Exclude system directories that require special permissions
 
-# Final goal
+### Script runs very slowly
+**Causes:**
+- Large libraries (10,000+ files) take time to process
+- Network drives are slower than local drives
+- ffprobe extraction is CPU-intensive
 
-Create a **self-contained offline media library** that:
+**Solutions:**
+- Be patient - first scan is always slowest
+- Exclude directories you don't need to scan
+- Run overnight for very large libraries
 
-- Works directly in a TV’s USB media browser
-- Is easy for non-technical users
-- Is backed up to cloud storage
-- Can be regenerated automatically from your archive
+### Classification is inaccurate
+**Solution:**
+- Review the CSV output to identify patterns
+- Modify the classification rules in the script
+- Submit an issue with examples for community help
+
+## License
+
+MIT License - Feel free to use and modify for personal or commercial projects.
+
+## Support
+
+If you encounter issues:
+
+1. **Check prerequisites** - Ensure ffprobe is installed and in PATH
+2. **Verify configuration** - Double-check drive paths in your script
+3. **Review CSV output** - Look for patterns in misclassified files
+4. **Check file permissions** - Ensure you have read access to source media
+5. **Submit an issue** - Include error messages and examples on GitHub
+
+## Acknowledgments
+
+Built with PowerShell and ffprobe for media enthusiasts who want to:
+- Organize large personal media collections
+- Create offline media libraries for TVs without smart features
+- Preserve physical media collections digitally
+- Share curated content with family and friends
+
+Perfect for cord-cutters, media archivists, and anyone who values owning their media library.
