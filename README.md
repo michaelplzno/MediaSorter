@@ -1,6 +1,6 @@
 <!-- @format -->
 
-# MediaSorter
+# MICHAELplzno MediaSorter
 
 A PowerShell-based tool for scanning, classifying, and organizing large media libraries into structured formats suitable for USB media players, TV playback, and cloud backup.
 
@@ -316,3 +316,4 @@ Built with PowerShell and ffprobe for media enthusiasts who want to:
 - Share curated content with family and friends
 
 Perfect for cord-cutters, media archivists, and anyone who values owning their media library.
+
