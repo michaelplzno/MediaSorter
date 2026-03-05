@@ -1,0 +1,19 @@
+# Generated CSV files
+*.csv
+
+# PowerShell temporary files
+*.tmp
+
+# Windows system files
+Thumbs.db
+desktop.ini
+
+# Editor files
+.vscode/
+.vs/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
