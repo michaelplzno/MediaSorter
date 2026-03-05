@@ -76,11 +76,38 @@ function EndsWithAny($nameLower, $endings) {
     return $false
 }
 
+# Noise words to remove from show names (case-insensitive)
+$script:noiseWords = @(
+    "GERMAN", "DUTCH", "FRENCH", "SPANISH", "ITALIAN", "JAPANESE", "RUSSIAN", "POLISH", "PORTUGUESE",
+    "BluRay", "BDRip", "BRRip", "Remux", "WEB-DL", "WEBRip", "HDTV", "DVDRip", "WebHD",
+    "1080p", "720p", "2160p", "4K", "480p", "576p",
+    "x264", "x265", "h264", "h265", "HEVC", "AVC", "XviD", "DivX",
+    "AAC", "AC3", "DTS", "TrueHD", "Atmos", "EAC3", "DD5", "DDP5",
+    "iNTERNAL", "PROPER", "REPACK", "LIMITED", "UNRATED", "EXTENDED", "DIRECTORS", "CUT",
+    "COMPLETE", "FULL", "SEASON", "SERIES",
+    "MULTi", "DUAL", "SUBBED", "DUBBED", "DL"
+)
+
+# Normalize all delimiters to spaces: . _ - and space all become space
+function Normalize-Delimiters($text) {
+    return $text -replace '[\._\-]+', ' '
+}
+
+# Remove noise words from text (case-insensitive)
+function Remove-NoiseWords($text) {
+    $cleaned = $text
+    foreach ($noise in $script:noiseWords) {
+        # Use word boundaries to avoid partial matches
+        $cleaned = $cleaned -replace "(?i)\b$([regex]::Escape($noise))\b", ""
+    }
+    return $cleaned
+}
+
 function SeasonInfoFromName($text) {
     # Returns @{ Show=""; Season="S01"; Matched=$true } or @{Matched=$false}
     $t = $text
 
-    # Match "S01", "S1"
+    # Match "S01", "S1", "S39" (SXX where XX < 40)
     $m1 = [regex]::Match($t, '(?i)\bS(?<sn>\d{1,2})\b')
     # Match "Season 1", "Season_01"
     $m2 = [regex]::Match($t, '(?i)\bSeason[\s\._-]*(?<sn>\d{1,2})\b')
@@ -90,24 +117,41 @@ function SeasonInfoFromName($text) {
     $m4 = [regex]::Match($t, '(?i)\bEp(?:isode)?[\s\._-]*\d{1,2}\b')
     # Match compact folder names like "TNGS05"
     $m5 = [regex]::Match($t, '(?i)^(?<show>[A-Za-z][A-Za-z0-9]{1,})S(?<sn>\d{1,2})$')
+    # Match year as delimiter (19XX or 20XX)
+    $mYear = [regex]::Match($t, '(?i)\b(?<year>(19|20)\d{2})\b')
 
     $sn = $null
     $showFromCompact = $null
-    if ($m1.Success) { $sn = $m1.Groups["sn"].Value }
-    elseif ($m2.Success) { $sn = $m2.Groups["sn"].Value }
-    elseif ($m3.Success) { $sn = $m3.Groups["sn"].Value }
-    elseif ($m4.Success) { $sn = "1" }  # Ep## without season info defaults to S01
-    elseif ($m5.Success) {
-        $sn = $m5.Groups["sn"].Value
-        $showFromCompact = $m5.Groups["show"].Value
+    $usedYearAsDelimiter = $false
+    
+    # Check if SXX match is valid (XX < 40)
+    if ($m1.Success) { 
+        $snVal = [int]$m1.Groups["sn"].Value
+        if ($snVal -lt 40) {
+            $sn = $m1.Groups["sn"].Value 
+        }
+    }
+    
+    if (-not $sn) {
+        if ($m2.Success) { $sn = $m2.Groups["sn"].Value }
+        elseif ($m3.Success) { $sn = $m3.Groups["sn"].Value }
+        elseif ($m4.Success) { $sn = "1" }  # Ep## without season info defaults to S01
+        elseif ($m5.Success) {
+            $snVal = [int]$m5.Groups["sn"].Value
+            if ($snVal -lt 40) {
+                $sn = $m5.Groups["sn"].Value
+                $showFromCompact = $m5.Groups["show"].Value
+            }
+        }
     }
 
     if (-not $sn) { return @{ Matched=$false } }
 
     $season = ("S{0:D2}" -f ([int]$sn))
 
-    # Extract show name: Everything BEFORE the season pattern is the name
+    # Extract show name: Everything BEFORE the season pattern (or year) is the name
     # Pattern: Show.Name.S01.extra.stuff → extract "Show.Name"
+    # Pattern: Show.Name.2020.extra.stuff → extract "Show.Name"
     $show = $t
     if ($showFromCompact) {
         $show = $showFromCompact
@@ -126,20 +170,24 @@ function SeasonInfoFromName($text) {
             $show = $t.Substring(0, $m4.Index)
         }
         
-        # If show is empty after extraction, try alternative approach
-        if ([string]::IsNullOrWhiteSpace($show)) {
-            # For archive/folder names, might have year first, try extracting before year
-            $yearMatch = [regex]::Match($t, '\b(19|20)\d{2}\b')
-            if ($yearMatch.Success) {
-                $show = $t.Substring(0, $yearMatch.Index)
+        # If show is empty after extraction, or if we have a year, use year as delimiter
+        if ([string]::IsNullOrWhiteSpace($show) -or $mYear.Success) {
+            if ($mYear.Success) {
+                $show = $t.Substring(0, $mYear.Index)
+                $usedYearAsDelimiter = $true
             }
         }
     }
     
-    # Clean up separators and extra spaces
-    $show = $show -replace '[\._]+', ' '
+    # Normalize delimiters (. _ - → space)
+    $show = Normalize-Delimiters $show
+    
+    # Remove noise words
+    $show = Remove-NoiseWords $show
+    
+    # Clean up extra spaces
     $show = $show -replace '\s+', ' '
-    $show = $show.Trim(" -_.")
+    $show = $show.Trim()
 
     return @{ Matched=$true; Show=$show; Season=$season }
 }
@@ -158,27 +206,43 @@ function EpisodeInfoFromName($text) {
     # Returns @{ Show=""; Season="S01"; Episode="E05"; Matched=$true } or @{Matched=$false}
     $t = $text
 
-    # Match "S01E05", "S1E5", etc.
+    # Match "S01E05", "S1E5", etc. (SXX where XX < 40)
     $m1 = [regex]::Match($t, '(?i)\bS(?<sn>\d{1,2})E(?<ep>\d{1,2})\b')
     # Match "1x05", "01x05", etc.
     $m2 = [regex]::Match($t, '(?i)\b(?<sn>\d{1,2})x(?<ep>\d{1,2})\b')
     # Match "Episode 05", "Ep05", "EP_05"
     $m3 = [regex]::Match($t, '(?i)\bEp(?:isode)?[\s\._-]*(?<ep>\d{1,2})\b')
+    # Match standalone "E05", "E12" (any EXX)
+    $m4 = [regex]::Match($t, '(?i)\bE(?<ep>\d{1,2})\b')
+    # Match year as delimiter (19XX or 20XX)
+    $mYear = [regex]::Match($t, '(?i)\b(?<year>(19|20)\d{2})\b')
 
     $sn = $null
     $ep = $null
+    $usedYearAsDelimiter = $false
 
-    if ($m1.Success) { 
-        $sn = $m1.Groups["sn"].Value 
-        $ep = $m1.Groups["ep"].Value
+    # Check if SXX match is valid (XX < 40)
+    if ($m1.Success) {
+        $snVal = [int]$m1.Groups["sn"].Value
+        if ($snVal -lt 40) {
+            $sn = $m1.Groups["sn"].Value 
+            $ep = $m1.Groups["ep"].Value
+        }
     }
-    elseif ($m2.Success) { 
-        $sn = $m2.Groups["sn"].Value 
-        $ep = $m2.Groups["ep"].Value
-    }
-    elseif ($m3.Success) { 
-        $sn = "1"  # Default to season 1 if not specified
-        $ep = $m3.Groups["ep"].Value
+    
+    if (-not $ep) {
+        if ($m2.Success) { 
+            $sn = $m2.Groups["sn"].Value 
+            $ep = $m2.Groups["ep"].Value
+        }
+        elseif ($m3.Success) { 
+            $sn = "1"  # Default to season 1 if not specified
+            $ep = $m3.Groups["ep"].Value
+        }
+        elseif ($m4.Success) {
+            $sn = "1"  # Standalone EXX defaults to season 1
+            $ep = $m4.Groups["ep"].Value
+        }
     }
 
     if (-not $ep) { return @{ Matched=$false } }
@@ -186,25 +250,47 @@ function EpisodeInfoFromName($text) {
     $season = ("S{0:D2}" -f ([int]$sn))
     $episode = ("E{0:D2}" -f ([int]$ep))
 
-    # Extract show name: Everything BEFORE the episode pattern is the name
+    # Extract show name: Everything BEFORE the episode pattern (or year) is the name
     # Pattern: Show.Name.S01E01.extra.stuff → extract "Show.Name"
+    # Pattern: Show.Name.2020.extra.stuff → extract "Show.Name"
     $show = $t
     
     # Find the position of the episode marker and take everything before it
+    $cutIndex = -1
     if ($m1.Success) {
-        $show = $t.Substring(0, $m1.Index)
+        $cutIndex = $m1.Index
     }
     elseif ($m2.Success) {
-        $show = $t.Substring(0, $m2.Index)
+        $cutIndex = $m2.Index
     }
     elseif ($m3.Success) {
-        $show = $t.Substring(0, $m3.Index)
+        $cutIndex = $m3.Index
+    }
+    elseif ($m4.Success) {
+        $cutIndex = $m4.Index
     }
     
-    # Clean up separators and extra spaces
-    $show = $show -replace '[\._]+', ' '
+    # Also check for year as delimiter - use whichever comes first
+    if ($mYear.Success) {
+        if ($cutIndex -lt 0 -or $mYear.Index -lt $cutIndex) {
+            $cutIndex = $mYear.Index
+            $usedYearAsDelimiter = $true
+        }
+    }
+    
+    if ($cutIndex -ge 0) {
+        $show = $t.Substring(0, $cutIndex)
+    }
+    
+    # Normalize delimiters (. _ - → space)
+    $show = Normalize-Delimiters $show
+    
+    # Remove noise words
+    $show = Remove-NoiseWords $show
+    
+    # Clean up extra spaces
     $show = $show -replace '\s+', ' '
-    $show = $show.Trim(" -_.")
+    $show = $show.Trim()
 
     return @{ Matched=$true; Show=$show; Season=$season; Episode=$episode }
 }

@@ -37,46 +37,42 @@ Perfect for creating offline media libraries on USB drives for non-smart TVs, or
 
 ## Getting Started
 
-### 1. Configuration
-
-Before running the scripts, configure your source drive paths. Each script file includes variables at the top that you'll need to customize:
-
-```powershell
-# Example - Edit these values at the top of your script
-$SourceDrive = "E:\"  # Your media library drive letter
-$OutputPrefix = "E"   # Prefix for output CSV files
-```
-
-**Available scripts:**
-
-- `MediaSorter-Ddrive.ps1` - Example script (rename and configure for your drive)
-- `MediaSorter-XDrive.ps1` - Example script (rename and configure for your drive)
-
-**To customize:**
-
-1. Copy one of the example scripts or create your own
-2. Edit the `$SourceDrive` variable to point to your media drive
-3. Edit the `$OutputPrefix` variable to name your output files
-4. Save the script with a descriptive name (e.g., `MediaSorter-MyDrive.ps1`)
-
-### 2. Run the Scanner
+### 1. Run the Scanner
 
 ```powershell
 # Navigate to the project directory
 cd e:\Dev\MediaSorter
 
-# Run your configured script
-.\MediaSorter-MyDrive.ps1
+# Scan a specific drive (defaults to D:\ if not specified)
+.\MediaSorter.ps1 -RootPath "D:\"
+
+# Scan other drives
+.\MediaSorter.ps1 -RootPath "E:\"
+.\MediaSorter.ps1 -RootPath "X:\"
+
+# Or scan a specific folder
+.\MediaSorter.ps1 -RootPath "C:\Videos\MyCollection"
 ```
+
+**Parameters:**
+
+- `-RootPath` (optional): Drive letter or folder path to scan (default: `"D:\"`)
+
+**Output files:**
+
+- CSV files are automatically named based on the drive letter (e.g., scanning `D:\` creates `D_media_*.csv`)
+- Scanning `E:\` creates `E_media_*.csv`, etc.
 
 The script will:
 
-1. Recursively scan all video files and archives on your specified drive
+1. Recursively scan all video files and archives on your specified drive or folder
 2. Extract metadata with ffprobe for each file
 3. Apply classification heuristics
-4. Generate CSV output files
+4. Detect and group loose episodes into virtual season bundles
+5. Identify duplicates between archives and extracted files
+6. Generate CSV output files
 
-### 3. Review Output
+### 2. Review Output
 
 After scanning completes, you'll find CSV files in the project directory:
 
@@ -97,9 +93,31 @@ MediaSorter uses intelligent heuristics to classify media:
 
 ### TV Episodes
 
-- Files with episode patterns: `S01E01`, `1x01`, `Episode 01`, `Ep01`
+- Files with episode patterns: `S01E01`, `1x01`, `Episode 01`, `Ep01`, `E01` (standalone)
+- Season patterns: `SXX` where XX < 40 (e.g., `S01`, `S25`, but not `S45`)
 - Duration typically 18-75 minutes
 - Classified as `TV_Episode`
+
+### Enhanced Parsing Features
+
+MediaSorter uses intelligent parsing to extract clean show names:
+
+- **Case-insensitive matching**: All pattern detection ignores case
+- **Multiple delimiters**: Treats `.`, `_`, `-`, and space as equivalent separators
+- **Year detection**: Recognizes 4-digit years starting with 19 or 20 (1900-2099) as delimiters
+- **Noise word filtering**: Automatically removes quality tags and release info:
+  - Language tags: `GERMAN`, `DUTCH`, `FRENCH`, `JAPANESE`, etc.
+  - Quality indicators: `BluRay`, `WEB-DL`, `HDTV`, `1080p`, `720p`, `4K`, etc.
+  - Codecs: `x264`, `x265`, `h264`, `HEVC`, `AAC`, `DTS`, etc.
+  - Release tags: `iNTERNAL`, `PROPER`, `REPACK`, `LIMITED`, etc.
+  - Other: `COMPLETE`, `DUAL`, `DL`, `MULTi`, etc.
+- **Delimiter-based extraction**: Takes everything BEFORE episode/season/year patterns as the show name
+
+**Example parsing:**
+
+- `South.Park.S25E05.iNTERNAL.1080p.WEB.h264-OPUS.mkv` → Show: `South Park`, Season: `S25`, Episode: `E05`
+- `The.Lazarus.Project.S01E01.German.AC3.DL.1080p.WebHD.x265-FuN.mkv` → Show: `The Lazarus Project`, Season: `S01`, Episode: `E01`
+- `Show.Name.2020.720p.BluRay.x264.mkv` → Everything before `2020` becomes the show name (if episode pattern exists)
 
 ### TV Season Archives
 
@@ -186,17 +204,17 @@ Each CSV contains the following key columns:
 ### Scan Multiple Drives
 
 ```powershell
-# Configure and run separate scripts for each drive
-.\MediaSorter-DriveE.ps1
-.\MediaSorter-DriveF.ps1
-.\MediaSorter-DriveG.ps1
+# Scan different drives with one command each
+.\MediaSorter.ps1 -RootPath "D:\"
+.\MediaSorter.ps1 -RootPath "E:\"
+.\MediaSorter.ps1 -RootPath "F:\"
 ```
 
 ### Analyze Results with PowerShell
 
 ```powershell
 # Import and filter movies only
-$movies = Import-Csv "E_media_items.csv" | Where-Object { $_.Kind -eq "Movie" }
+$movies = Import-Csv "D_media_items.csv" | Where-Object { $_.AutoCategory -eq "Movie" }
 
 # Find all Star Trek episodes
 $trek = Import-Csv "E_media_items.csv" | Where-Object { $_.Show -like "*Star Trek*" }
