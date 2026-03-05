@@ -106,18 +106,39 @@ function SeasonInfoFromName($text) {
 
     $season = ("S{0:D2}" -f ([int]$sn))
 
-    # Guess show by removing season tokens & common quality tags
+    # Extract show name: Everything BEFORE the season pattern is the name
+    # Pattern: Show.Name.S01.extra.stuff → extract "Show.Name"
     $show = $t
     if ($showFromCompact) {
         $show = $showFromCompact
     } else {
-        $show = [regex]::Replace($show, '(?i)\bS\d{1,2}\b', '')
-        $show = [regex]::Replace($show, '(?i)\bSeason[\s\._-]*\d{1,2}\b', '')
-        $show = [regex]::Replace($show, '(?i)\bSeries[\s\._-]*\d{1,2}\b', '')
-        $show = [regex]::Replace($show, '(?i)\bEp(?:isode)?[\s\._-]*\d{1,2}\b', '')
-        $show = [regex]::Replace($show, '(?i)\bComplete\b|\bWEB[-\s]?DL\b|\bBluRay\b|\b1080p\b|\b720p\b|\b2160p\b|\b4K\b|\bHDR\b', '')
+        # Find the position of the season marker and take everything before it
+        if ($m1.Success) {
+            $show = $t.Substring(0, $m1.Index)
+        }
+        elseif ($m2.Success) {
+            $show = $t.Substring(0, $m2.Index)
+        }
+        elseif ($m3.Success) {
+            $show = $t.Substring(0, $m3.Index)
+        }
+        elseif ($m4.Success) {
+            $show = $t.Substring(0, $m4.Index)
+        }
+        
+        # If show is empty after extraction, try alternative approach
+        if ([string]::IsNullOrWhiteSpace($show)) {
+            # For archive/folder names, might have year first, try extracting before year
+            $yearMatch = [regex]::Match($t, '\b(19|20)\d{2}\b')
+            if ($yearMatch.Success) {
+                $show = $t.Substring(0, $yearMatch.Index)
+            }
+        }
     }
+    
+    # Clean up separators and extra spaces
     $show = $show -replace '[\._]+', ' '
+    $show = $show -replace '\s+', ' '
     $show = $show.Trim(" -_.")
 
     return @{ Matched=$true; Show=$show; Season=$season }
@@ -165,13 +186,24 @@ function EpisodeInfoFromName($text) {
     $season = ("S{0:D2}" -f ([int]$sn))
     $episode = ("E{0:D2}" -f ([int]$ep))
 
-    # Extract show name by removing episode markers and quality tags
+    # Extract show name: Everything BEFORE the episode pattern is the name
+    # Pattern: Show.Name.S01E01.extra.stuff → extract "Show.Name"
     $show = $t
-    $show = [regex]::Replace($show, '(?i)\bS\d{1,2}E\d{1,2}\b', '')
-    $show = [regex]::Replace($show, '(?i)\b\d{1,2}x\d{1,2}\b', '')
-    $show = [regex]::Replace($show, '(?i)\bEp(?:isode)?[\s\._-]*\d{1,2}\b', '')
-    $show = [regex]::Replace($show, '(?i)\bComplete\b|\bWEB[-\s]?DL\b|\bBluRay\b|\b1080p\b|\b720p\b|\b2160p\b|\b4K\b|\bHDR\b|\bHEVC\b|\bx264\b|\bx265\b', '')
+    
+    # Find the position of the episode marker and take everything before it
+    if ($m1.Success) {
+        $show = $t.Substring(0, $m1.Index)
+    }
+    elseif ($m2.Success) {
+        $show = $t.Substring(0, $m2.Index)
+    }
+    elseif ($m3.Success) {
+        $show = $t.Substring(0, $m3.Index)
+    }
+    
+    # Clean up separators and extra spaces
     $show = $show -replace '[\._]+', ' '
+    $show = $show -replace '\s+', ' '
     $show = $show.Trim(" -_.")
 
     return @{ Matched=$true; Show=$show; Season=$season; Episode=$episode }
