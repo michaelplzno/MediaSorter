@@ -1,4 +1,4 @@
-<!-- @format -->
+﻿<!-- @format -->
 
 # MICHAELplzno MediaSorter
 
@@ -25,6 +25,7 @@ Perfect for creating offline media libraries on USB drives for non-smart TVs, or
 - 📊 **CSV export** for easy filtering, planning, and analysis
 - 🎯 **Metadata extraction** using ffprobe (duration, resolution, file size)
 - 🏷️ **Episode parsing** extracts show name, season, and episode numbers from filenames
+- 🧹 **Filename cleanup** removes garbage words like quality indicators, codecs, and release tags
 - 🔧 **Customizable** classification rules and heuristics
 - 📝 **Error logging** for problematic files
 
@@ -34,6 +35,8 @@ Perfect for creating offline media libraries on USB drives for non-smart TVs, or
 - **ffprobe** (part of FFmpeg) installed and available in PATH
   - Download from: https://ffmpeg.org/download.html
   - Verify installation: `ffprobe -version`
+- **ffmpeg** (part of FFmpeg) installed and available in PATH
+  - Verify installation: `ffmpeg -version`
 
 ## Getting Started
 
@@ -239,6 +242,28 @@ Open the CSV files in Excel or Google Sheets and use filters to:
 
 Once you've scanned and reviewed your media inventory:
 
+### 0. Clean Filenames (Optional but Recommended)
+
+Before organizing, clean up garbage words from filenames:
+
+```powershell
+# Scan to see what would be cleaned
+.\TheScrubber.ps1 -TargetDrive "F:\" -ScanOnly
+
+# Preview changes without actually renaming
+.\TheScrubber.ps1 -TargetDrive "F:\" -DryRun
+
+# Apply the cleanup
+.\TheScrubber.ps1 -TargetDrive "F:\"
+```
+
+TheScrubber removes quality indicators, codec names, and release group info from filenames:
+
+- **Before:** `The.Office.S01E01.Pilot.1080p.BluRay.x265.HEVC.AAC-PSA.mkv`
+- **After:** `The Office S01E01 Pilot.mkv`
+
+See [THE_SCRUBBER.md](THE_SCRUBBER.md) for full documentation.
+
 ### 1. Filter Content
 
 Use the CSV files to decide which movies and shows to include on your USB drive.
@@ -282,6 +307,21 @@ robocopy "E:\Media\Movies" "F:\Movies" /E /R:3 /W:5 /LOG:copy.log
 # /W:5 - Wait 5 seconds between retries
 # /LOG - Create a log file
 ```
+
+### 5. Normalize Audio Defaults (Optional but Recommended)
+
+If some files default to German audio, run the audio normalizer on the destination drive after export:
+
+```powershell
+# Preview only
+.\NormalizeAudioTracks.ps1 -RootPath "F:\" -DryRun
+
+# Apply changes
+.\NormalizeAudioTracks.ps1 -RootPath "F:\"
+```
+
+This removes German audio tracks and sets English as default when available.
+See `AUDIO_NORMALIZER.md` for full options and troubleshooting.
 
 ## Planned Features
 
