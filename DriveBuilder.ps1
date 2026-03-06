@@ -52,6 +52,7 @@ $tarExtensions = @(".tar", ".tgz", ".tar.gz", ".tar.xz", ".tar.zst")
 $partialCopySuffix = ".__partial_copy__"
 $partialExtractSuffix = ".__partial_extract__"
 $archiveCompletionMarkerFile = ".drive_builder_extract_complete"
+$completedArchivesManifest = ".drive_builder_completed_archives"
 $integrityCacheFolder = ".integrity_cache"
 $integrityProgressId = 2
 
@@ -851,14 +852,26 @@ function Get-TransferState {
         $hasExtractPath = Test-Path -LiteralPath $archivePaths.ExtractPath -PathType Container
         $hasPartialExtractPath = Test-Path -LiteralPath $archivePaths.PartialExtractPath -PathType Container
         $hasCompletionMarker = Test-Path -LiteralPath $archivePaths.CompletionMarker -PathType Leaf
+        
+        # Check if archive is in the global completed archives manifest
+        $manifestRoot = [System.IO.Path]::GetPathRoot($DestinationPath)
+        if ([string]::IsNullOrWhiteSpace($manifestRoot)) {
+            $manifestRoot = $DestinationPath
+        }
+        $manifestPath = Join-Path $manifestRoot $completedArchivesManifest
+        $isInManifest = $false
+        if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+            $completedList = Get-Content -LiteralPath $manifestPath -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\s*$' -eq $false }
+            $isInManifest = $completedList -contains $fileName
+        }
 
-        $isComplete = $hasExtractPath -and $hasCompletionMarker -and (-not $hasPartialExtractPath)
-        $needsRepair = $hasPartialExtractPath -or ($hasExtractPath -and (-not $hasCompletionMarker))
+        $isComplete = ($hasExtractPath -and $hasCompletionMarker -and (-not $hasPartialExtractPath)) -or $isInManifest
+        $needsRepair = ($hasPartialExtractPath -or ($hasExtractPath -and (-not $hasCompletionMarker))) -and (-not $isInManifest)
 
         $reason = ""
         if ($hasPartialExtractPath) {
             $reason = "Partial archive extraction folder exists"
-        } elseif ($hasExtractPath -and (-not $hasCompletionMarker)) {
+        } elseif ($hasExtractPath -and (-not $hasCompletionMarker) -and (-not $isInManifest)) {
             $reason = "Archive extraction folder exists without completion marker"
         }
 
@@ -1365,6 +1378,470 @@ function Copy-FileWithProgress {
     }
 }
 
+function Find-DoubleFolders {
+    param(
+        [string]$BasePath
+    )
+    
+    $doubleFolders = @()
+    
+    if (-not (Test-Path -LiteralPath $BasePath -PathType Container)) {
+        return $doubleFolders
+    }
+    
+    Get-ChildItem -LiteralPath $BasePath -Directory -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+        $folder = $_
+        $folderName = $folder.Name
+        $parentPath = $folder.Parent.FullName
+        
+        # Check if immediate child has the same name as parent
+        $childPath = Join-Path $folder.FullName $folderName
+        if (Test-Path -LiteralPath $childPath -PathType Container) {
+            $doubleFolders += [PSCustomObject]@{
+                OuterPath = $folder.FullName
+                InnerPath = $childPath
+                FolderName = $folderName
+            }
+        }
+    }
+    
+    return $doubleFolders
+}
+
+function Fix-DoubleFolders {
+    param(
+        [string]$BasePath,
+        [switch]$DryRun = $false
+    )
+    
+    $doubleFolders = Find-DoubleFolders -BasePath $BasePath
+    
+    if ($doubleFolders.Count -eq 0) {
+        return $true
+    }
+    
+    Log-Message "Found $($doubleFolders.Count) double folder(s) to fix"
+    
+    foreach ($doubleFolder in $doubleFolders) {
+        try {
+            Log-Message "Fixing double folder: $($doubleFolder.OuterPath)"
+            
+            if (-not $DryRun) {
+                # Get all items from inner folder
+                $innerItems = Get-ChildItem -LiteralPath $doubleFolder.InnerPath -Force
+                
+                # Move items up one level
+                foreach ($item in $innerItems) {
+                    $targetPath = Join-Path $doubleFolder.OuterPath $item.Name
+                    
+                    # If target exists, remove it first
+                    if (Test-Path -LiteralPath $targetPath) {
+                        Remove-Item -LiteralPath $targetPath -Recurse -Force -ErrorAction Stop
+                    }
+                    
+                    Move-Item -LiteralPath $item.FullName -Destination $targetPath -Force -ErrorAction Stop
+                    Log-Message "  Moved: $($item.Name)"
+                }
+                
+                # Remove now-empty inner folder
+                Remove-Item -LiteralPath $doubleFolder.InnerPath -Force -ErrorAction Stop
+                Log-Message "  Removed empty nested folder"
+            } else {
+                Log-Message "  [DRY RUN] Would unnest contents from $($doubleFolder.InnerPath)"
+            }
+        }
+        catch {
+            Log-Error "Failed to fix double folder '$($doubleFolder.OuterPath)': $_"
+            return $false
+        }
+    }
+    
+    return $true
+}
+
+function Detect-MediaType {
+    param(
+        [string]$FolderPath,
+        [string]$FolderName
+    )
+    
+    # Pattern detection for TV seasons
+    $seasonPatterns = @(
+        'S\d{2}',           # S01, S02, etc.
+        'Season',           # Season 1, Season 01
+        'Season\s*\d+',     # case insensitive via regex later
+        'Serie',            # German "Serie"
+        'tmp_burn'          # temp season folder markers
+    )
+    
+    # Pattern detection for movies
+    $moviePatterns = @(
+        '\b(19|20)\d{2}\b', # Year 1900-2099
+        '\.mkv$',           # Movie containers
+        '\.mp4$',
+        'BluRay|BRRip',     # Movie quality markers
+        'HEVC|x\.?265',     # Codec markers common in movies
+        'IMAX',
+        'EXTENDED',
+        'DIRECTORS.CUT'
+    )
+    
+    $tvScore = 0
+    $movieScore = 0
+    
+    # Check folder name against patterns
+    foreach ($pattern in $seasonPatterns) {
+        if ($FolderName -match $pattern) {
+            $tvScore += 3
+        }
+    }
+    
+    foreach ($pattern in $moviePatterns) {
+        if ($FolderName -match $pattern) {
+            $movieScore += 2
+        }
+    }
+    
+    # Check folder contents for media files
+    if (Test-Path -LiteralPath $FolderPath -PathType Container) {
+        $files = Get-ChildItem -LiteralPath $FolderPath -File -Recurse -ErrorAction SilentlyContinue
+        
+        foreach ($file in $files) {
+            # Check for season/episode patterns in filenames
+            if ($file.Name -match 'S\d{2}E\d{2}|Season.*Episode') {
+                $tvScore += 5
+            }
+            
+            # Check for year pattern (common in movies)
+            if ($file.Name -match '\(?(19|20)\d{2}\)?') {
+                $movieScore += 2
+            }
+        }
+    }
+    
+    if ($tvScore -eq 0 -and $movieScore -eq 0) {
+        return "Unknown"
+    }
+    
+    if ($tvScore -gt $movieScore) {
+        return "TV"
+    } else {
+        return "Movie"
+    }
+}
+
+function Get-ArchiveFileNamesFromMediaItems {
+    param(
+        [object[]]$MediaItems = @()
+    )
+
+    $archiveLookup = @{}
+
+    foreach ($mediaItem in $MediaItems) {
+        if ($null -eq $mediaItem) {
+            continue
+        }
+
+        foreach ($candidateRaw in @($mediaItem.FileName, $mediaItem.DuplicateOf)) {
+            if ([string]::IsNullOrWhiteSpace($candidateRaw)) {
+                continue
+            }
+
+            $candidateFileName = Split-Path $candidateRaw -Leaf
+            if (-not [string]::IsNullOrWhiteSpace($candidateFileName) -and (Get-IsArchiveFile -FileName $candidateFileName)) {
+                $archiveLookup[$candidateFileName.ToLowerInvariant()] = $candidateFileName
+            }
+        }
+    }
+
+    return @($archiveLookup.Values)
+}
+
+function Invoke-PostBuildCleanup {
+    param(
+        [string]$DestinationPath,
+        [switch]$DryRun = $false,
+        [object[]]$MediaItems = @()
+    )
+    
+    Log-Message "=== Starting Post-Build Cleanup Pass ==="
+    $reclassifiedClipFolderNames = @()
+
+    
+    # Step 1: Fix double folders
+    Log-Message "Step 1: Detecting and fixing double folder structures..."
+    $fixResult = Fix-DoubleFolders -BasePath $DestinationPath -DryRun:$DryRun
+    if (-not $fixResult) {
+        Log-Error "Double folder fix encountered errors but continuing"
+    }
+    
+    # Step 2: Review and offer reclassification suggestions
+    Log-Message "Step 2: Reviewing media classifications..."
+    $clipsPath = Join-Path $DestinationPath "Clips"
+    
+    if (Test-Path -LiteralPath $clipsPath -PathType Container) {
+        $clipsFolder = Get-Item -LiteralPath $clipsPath
+        $clipItems = Get-ChildItem -LiteralPath $clipsPath -Directory -ErrorAction SilentlyContinue
+        
+        if ($clipItems.Count -gt 0) {
+            Log-Message "Analyzing $($clipItems.Count) item(s) in Clips folder for potential reclassification..."
+            
+            foreach ($item in $clipItems) {
+                $detectedType = Detect-MediaType -FolderPath $item.FullName -FolderName $item.Name
+                
+                if ($detectedType -eq "TV") {
+                    $destFolder = Join-Path $DestinationPath "TV"
+                    Log-Message "  [RECLASSIFY] '$($item.Name)' -> TV (detected TV season pattern)"
+
+                    if ($reclassifiedClipFolderNames -notcontains $item.Name) {
+                        $reclassifiedClipFolderNames += $item.Name
+                    }
+                    
+                    if (-not $DryRun) {
+                        try {
+                            if (-not (Test-Path -LiteralPath $destFolder)) {
+                                New-Item -ItemType Directory -Path $destFolder -Force -ErrorAction Stop | Out-Null
+                            }
+                            
+                            $targetPath = Join-Path $destFolder $item.Name
+                            if (Test-Path -LiteralPath $targetPath) {
+                                Log-Message "    WARNING: Destination exists, skipping move"
+                            } else {
+                                Move-Item -LiteralPath $item.FullName -Destination $targetPath -Force -ErrorAction Stop
+                                Log-Message "    [OK] Moved to TV folder"
+                            }
+                        }
+                        catch {
+                            Log-Error "    Failed to move '$($item.Name)': $_"
+                        }
+                    }
+                } elseif ($detectedType -eq "Movie") {
+                    $destFolder = Join-Path $DestinationPath "Movies"
+                    Log-Message "  [RECLASSIFY] '$($item.Name)' -> Movies (detected movie pattern)"
+
+                    if ($reclassifiedClipFolderNames -notcontains $item.Name) {
+                        $reclassifiedClipFolderNames += $item.Name
+                    }
+                    
+                    if (-not $DryRun) {
+                        try {
+                            if (-not (Test-Path -LiteralPath $destFolder)) {
+                                New-Item -ItemType Directory -Path $destFolder -Force -ErrorAction Stop | Out-Null
+                            }
+                            
+                            $targetPath = Join-Path $destFolder $item.Name
+                            if (Test-Path -LiteralPath $targetPath) {
+                                Log-Message "    WARNING: Destination exists, skipping move"
+                            } else {
+                                Move-Item -LiteralPath $item.FullName -Destination $targetPath -Force -ErrorAction Stop
+                                Log-Message "    [OK] Moved to Movies folder"
+                            }
+                        }
+                        catch {
+                            Log-Error "    Failed to move '$($item.Name)': $_"
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    # Step 3: Remove empty folders
+    Log-Message "Step 3: Removing empty folders from Clips..."
+    $clipsPath = Join-Path $DestinationPath "Clips"
+    
+    if (Test-Path -LiteralPath $clipsPath -PathType Container) {
+        $emptyFoldersRemoved = 0
+        
+        # Get all directories, sorted by depth (deepest first) to clean bottom-up
+        $allDirs = Get-ChildItem -LiteralPath $clipsPath -Directory -Recurse -ErrorAction SilentlyContinue | Sort-Object { $_.FullName.Length } -Descending
+        
+        foreach ($dir in $allDirs) {
+            # Check if directory is empty
+            $itemsInDir = @(Get-ChildItem -LiteralPath $dir.FullName -Force -ErrorAction SilentlyContinue)
+            
+            if ($itemsInDir.Count -eq 0) {
+                try {
+                    if ($DryRun) {
+                        Log-Message "  [DRY RUN] Would remove empty folder: $($dir.Name)"
+                    } else {
+                        Remove-Item -LiteralPath $dir.FullName -Force -ErrorAction Stop
+                        Log-Message "  Removed empty folder: $($dir.Name)"
+                    }
+                    $emptyFoldersRemoved++
+                }
+                catch {
+                    Log-Error "  Failed to remove empty folder '$($dir.FullName)': $_"
+                }
+            }
+        }
+        
+        if ($emptyFoldersRemoved -gt 0) {
+            if ($DryRun) {
+                Log-Message "[DRY RUN] Would remove $emptyFoldersRemoved empty folder(s)"
+            } else {
+                Log-Message "Removed $emptyFoldersRemoved empty folder(s)"
+            }
+        } else {
+            Log-Message "No empty folders found"
+        }
+    }
+    
+    # Step 4: Update completed archives manifest to prevent re-doing transfers
+    Log-Message "Step 4: Updating completed archives manifest..."
+    $manifestPath = Join-Path $DestinationPath $completedArchivesManifest
+    $completedArchives = @()
+    $archivesMarked = 0
+    $clipsPath = Join-Path $DestinationPath "Clips"
+    $tvPath = Join-Path $DestinationPath "TV"
+    $moviesPath = Join-Path $DestinationPath "Movies"
+
+    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+        $completedArchives = @(Get-Content -LiteralPath $manifestPath -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\s*$' -eq $false })
+    }
+
+    if ($MediaItems) {
+        foreach ($mediaItem in $MediaItems) {
+            if ([string]::IsNullOrWhiteSpace($mediaItem.FileName)) { continue }
+
+            $archiveFileName = Split-Path $mediaItem.FileName -Leaf
+            if (-not (Get-IsArchiveFile -FileName $archiveFileName)) { continue }
+            if ($completedArchives -contains $archiveFileName) { continue }
+
+            $extractFolderName = Get-ArchiveExtractFolderName -FileName $archiveFileName
+
+            $clipsExtractPath = Join-Path $clipsPath $extractFolderName
+            $tvExtractPath = Join-Path $tvPath $extractFolderName
+            $moviesExtractPath = Join-Path $moviesPath $extractFolderName
+
+            $wasReclassifiedThisRun = $reclassifiedClipFolderNames -contains $extractFolderName
+            $movedFromClipsPreviously = (-not (Test-Path -LiteralPath $clipsExtractPath -PathType Container)) -and (
+                (Test-Path -LiteralPath $tvExtractPath -PathType Container) -or
+                (Test-Path -LiteralPath $moviesExtractPath -PathType Container)
+            )
+
+            if ($wasReclassifiedThisRun -or $movedFromClipsPreviously) {
+                $completedArchives += $archiveFileName
+                Log-Message "  Marked completed: $archiveFileName"
+                $archivesMarked++
+            }
+        }
+    }
+
+    if ($archivesMarked -gt 0) {
+        if ($DryRun) {
+            Log-Message "[DRY RUN] Would update manifest: $archivesMarked archive(s) marked as completed"
+        } else {
+            try {
+                $completedArchives | Sort-Object -Unique | Out-File -LiteralPath $manifestPath -Encoding ascii -Force -ErrorAction Stop
+                Log-Message "Updated manifest: $archivesMarked archive(s) marked as completed"
+            }
+            catch {
+                Log-Error "Failed to update completed archives manifest: $_"
+            }
+        }
+    } else {
+        Log-Message "No archives were reclassified"
+    }
+
+    # Step 5: Generate missing integrity hashes for files extracted from tar archives
+    Log-Message "Step 5: Generating integrity hashes for extracted archive files..."
+
+    $archiveFileNames = Get-ArchiveFileNamesFromMediaItems -MediaItems $MediaItems
+    if ($archiveFileNames.Count -eq 0) {
+        Log-Message "No archive-backed media items found; skipping extracted hash generation"
+        Log-Message "=== Post-Build Cleanup Complete ==="
+        return
+    }
+
+    $archiveSearchRoots = @(
+        (Join-Path $DestinationPath "Clips"),
+        (Join-Path $DestinationPath "TV"),
+        (Join-Path $DestinationPath "Movies")
+    )
+
+    $filesToHash = @()
+    $seenFilePaths = @{}
+
+    foreach ($archiveFileName in $archiveFileNames) {
+        $extractFolderName = Get-ArchiveExtractFolderName -FileName $archiveFileName
+
+        foreach ($searchRoot in $archiveSearchRoots) {
+            $extractPath = Join-Path $searchRoot $extractFolderName
+            if (-not (Test-Path -LiteralPath $extractPath -PathType Container)) {
+                continue
+            }
+
+            $archiveFiles = Get-ChildItem -LiteralPath $extractPath -File -Recurse -ErrorAction SilentlyContinue | Where-Object {
+                $_.Name -ne $archiveCompletionMarkerFile
+            }
+
+            foreach ($archiveFile in $archiveFiles) {
+                $pathKey = $archiveFile.FullName.ToLowerInvariant()
+                if (-not $seenFilePaths.ContainsKey($pathKey)) {
+                    $seenFilePaths[$pathKey] = $true
+                    $filesToHash += $archiveFile
+                }
+            }
+        }
+    }
+
+    if ($filesToHash.Count -eq 0) {
+        Log-Message "No extracted archive files found in Clips/TV/Movies"
+        Log-Message "=== Post-Build Cleanup Complete ==="
+        return
+    }
+
+    $hashGenerated = 0
+    $hashSkipped = 0
+    $hashFailed = 0
+    $hashWouldGenerate = 0
+    $hashIndex = 0
+    $hashTotal = $filesToHash.Count
+
+    foreach ($fileToHash in $filesToHash) {
+        $hashIndex++
+        $destinationFile = $fileToHash.FullName
+        $fileSize = [long]$fileToHash.Length
+
+        $cachedHash = Get-HashFromCache -DestinationFile $destinationFile -DestinationBasePath $DestinationPath -ExpectedFileSize $fileSize
+        if ($cachedHash -and $cachedHash.IsValid) {
+            $hashSkipped++
+            continue
+        }
+
+        if ($DryRun) {
+            $hashWouldGenerate++
+            continue
+        }
+
+        if (($hashIndex % 25 -eq 0) -or ($hashIndex -eq $hashTotal)) {
+            Log-Message "  Hash progress: $hashIndex/$hashTotal"
+        }
+
+        $hash = Get-FileMD5 -FilePath $destinationFile
+        if (-not $hash) {
+            $hashFailed++
+            continue
+        }
+
+        $saved = Save-HashToCache -DestinationFile $destinationFile -DestinationBasePath $DestinationPath -Hash $hash -FileSize $fileSize
+        if ($saved) {
+            $hashGenerated++
+        } else {
+            $hashFailed++
+        }
+    }
+
+    if ($DryRun) {
+        Log-Message "[DRY RUN] Extracted hash generation candidates: $hashWouldGenerate (already cached: $hashSkipped)"
+    } else {
+        Log-Message "Extracted integrity hashes generated: $hashGenerated (already cached: $hashSkipped, failed: $hashFailed)"
+    }
+    
+    Log-Message "=== Post-Build Cleanup Complete ==="
+}
+
 # Main execution
 Log-Message "=== Drive Builder Started ==="
 Log-Message "Destination: $dest"
@@ -1594,6 +2071,14 @@ if ($filesToCopy.Count -eq 0) {
     Log-Message "No exportable files to copy after filtering and existing-file checks."
     Log-Message "Already present: $($alreadyExists.Count)"
     Log-Message "Excluded by category: $($excludedItems.Count)"
+    
+    # Still run cleanup pass if there are already files on destination
+    if ($alreadyExists.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Running post-build cleanup on existing files..." -ForegroundColor Cyan
+        Invoke-PostBuildCleanup -DestinationPath $dest -DryRun:$DryRun -MediaItems $allItems
+    }
+    
     Write-LogsToDisk
     exit 0
 }
@@ -1611,7 +2096,11 @@ Log-Message "Drive Total: $([math]::Round($driveInfo.TotalSize / 1GB, 2)) GB"
 Log-Message "Drive Free: $([math]::Round($driveInfo.FreeSpace / 1GB, 2)) GB"
 Log-Message "Drive Used: $([math]::Round($driveInfo.UsedSpace / 1GB, 2)) GB"
 
-if ($totalBytes -gt $driveInfo.FreeSpace) {
+# Check if we have enough space
+$hasEnoughSpace = $totalBytes -le $driveInfo.FreeSpace
+$spaceIssue = $false
+
+if (-not $hasEnoughSpace) {
     $needed = [math]::Round($totalBytes / 1GB, 2)
     $available = [math]::Round($driveInfo.FreeSpace / 1GB, 2)
     $shortBy = [math]::Round(($totalBytes - $driveInfo.FreeSpace) / 1GB, 2)
@@ -1627,13 +2116,13 @@ if ($totalBytes -gt $driveInfo.FreeSpace) {
     Write-Host "  2. Use a larger drive"
     Write-Host "  3. Select only some files to copy (modify CSV patterns)"
     Write-Host ""
-    Stop-DriveBuilder -Message "INSUFFICIENT DISK SPACE: Drive does not have enough space for this transfer"
-}
-
-$safetyMargin = [math]::Round($driveInfo.FreeSpace * 0.05) # 5% safety margin
-if (($totalBytes + $safetyMargin) -gt $driveInfo.FreeSpace) {
-    $margin = [math]::Round($safetyMargin / 1GB, 2)
-    Log-Message "WARNING: Only $margin GB safety margin remaining after copy"
+    $spaceIssue = $true
+} else {
+    $safetyMargin = [math]::Round($driveInfo.FreeSpace * 0.05) # 5% safety margin
+    if (($totalBytes + $safetyMargin) -gt $driveInfo.FreeSpace) {
+        $margin = [math]::Round($safetyMargin / 1GB, 2)
+        Log-Message "WARNING: Only $margin GB safety margin remaining after copy"
+    }
 }
 
 if ($DryRun) {
@@ -1677,8 +2166,26 @@ if ($DryRun) {
         Log-Message "INSUFFICIENT SPACE [not ok]"
     }
     
+    # Still run cleanup pass for dry-run
+    if ($alreadyExists.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Running post-build cleanup on existing files..." -ForegroundColor Cyan
+        Invoke-PostBuildCleanup -DestinationPath $dest -DryRun:$DryRun -MediaItems $allItems
+    }
+    
     Write-LogsToDisk
     exit 0
+}
+
+# If there's a space issue but we're not in dry-run, still try to run cleanup before aborting
+if ($spaceIssue) {
+    if ($alreadyExists.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Running post-build cleanup before aborting..." -ForegroundColor Cyan
+        Invoke-PostBuildCleanup -DestinationPath $dest -DryRun:$false -MediaItems $allItems
+        Write-Host ""
+    }
+    Stop-DriveBuilder -Message "INSUFFICIENT DISK SPACE: Drive does not have enough space for this transfer"
 }
 
 # Perform actual copy operations
@@ -1730,6 +2237,13 @@ Log-Message "Failed:        $failureCount"
 Log-Message "Total Data Copied: $([math]::Round($processedBytes / 1GB, 2)) GB"
 $grandTotal = $successCount + $skipCount + $alreadyExists.Count + $excludedItems.Count
 Log-Message "Grand Total Files Evaluated: $grandTotal"
+
+# Invoke post-build cleanup pass
+if ($successCount -gt 0 -or $alreadyExists.Count -gt 0) {
+    Write-Host ""
+    Write-Host "Invoking post-build cleanup..." -ForegroundColor Cyan
+    Invoke-PostBuildCleanup -DestinationPath $dest -DryRun:$DryRun -MediaItems $allItems
+}
 
 # Write logs to files
 Write-LogsToDisk
