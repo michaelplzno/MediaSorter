@@ -17,3 +17,4 @@ desktop.ini
 
 # Logs
 *.log
+logs/x_scan_output.txt
