@@ -84,7 +84,7 @@ $script:garbageWords = @(
     "BluRay", "BDRip", "BRRip", "Remux", "WEB-DL", "WEBRip", "HDTV", "DVDRip", "WebHD",
     "HDCAM", "CAM", "TS", "TC", "DVDSCR", "SCREENER", "PDTV", "SDTV", "DSR",
     "HDRip", "PPVRip", "VHSRip", "VODRip", "AMZN", "NF", "DSNP", "HMAX", "ATVP",
-    "iP", "WEB", "WEBRIP", "WEBDL",
+    "iP", "WEB", "WEBRIP", "WEBDL", "NTSC",
     
     # Resolution
     "1080p", "720p", "2160p", "4K", "480p", "576p", "360p", "240p",
@@ -93,12 +93,12 @@ $script:garbageWords = @(
     # Video Codecs
     "x264", "x265", "h264", "h265", "HEVC", "AVC", "XviD", "DivX",
     "VP8", "VP9", "AV1", "MPEG2", "MPEG4",
-    "10bit", "8bit", "10BIT", "8BIT",
+    "10bit", "8bit", "10BIT", "8BIT", "0.H.264", "DV.HDR",
     
     # Audio Codecs
     "AAC", "AC3", "DTS", "TrueHD", "Atmos", "EAC3", "DD5", "DDP5",
     "MP3", "FLAC", "DD51", "DTS-HD", "DTSHD", "MA", "DD", "DDP",
-    "DD+", "E-AC-3",
+    "DD+", "E-AC-3", "AAC2.0", "DDP2",
     
     # Release Info
     "iNTERNAL", "PROPER", "REPACK", "LIMITED", "UNRATED", "EXTENDED", "DIRECTORS", "CUT",
@@ -111,6 +111,8 @@ $script:garbageWords = @(
     # Release Groups Indicators (common patterns)
     "RARBG", "YIFY", "YTS", "PSA", "SPARKS", "CMRG", "ION10", "STUTTERSHIT",
     "FGT", "ETRG", "EVO", "DEFLATE", "INFLATE", "GECKOS", "HEVC",
+    "d3g", "BKK", "NTb", "ZORN", "FuN", "SiGMA",
+    "AC3D", "MG", "REWARD", "SAUERKRAUT", "FQM", "iVy", "ZeroTwo", "CasStudio",
     
     # Common Brackets/Delimiters patterns (these will be handled specially)
     # We'll remove content in brackets that matches patterns like [1080p] or (x265)
@@ -269,14 +271,31 @@ function Scan-Items {
         # Now get all files
         Write-Progress -Id $progressId -Activity "Scanning drive" -Status "Enumerating files..." -PercentComplete 50
         
-        # Common video extensions
+        # Common video extensions + checksum files inside .integrity_cache
         $videoExtensions = @(".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".ts", ".m2ts", ".webm", ".flv", ".mpg", ".mpeg")
-        
-        $allFiles = @(Get-ChildItem -LiteralPath $path -File -Recurse -ErrorAction SilentlyContinue | 
-                      Where-Object { $videoExtensions -contains $_.Extension.ToLower() })
+        $checksumExtensions = @(".md5", ".sha1", ".sha256", ".sha512")
+
+        $allFiles = @(Get-ChildItem -LiteralPath $path -File -Recurse -ErrorAction SilentlyContinue |
+                      Where-Object {
+                          $ext = $_.Extension.ToLower()
+                          if ($videoExtensions -contains $ext) {
+                              return $true
+                          }
+
+                          # Keep checksum cache names aligned with scrubbed media names.
+                          $inIntegrityCache = $_.FullName.ToLower().Contains("\.integrity_cache\")
+                          if (-not ($inIntegrityCache -and ($checksumExtensions -contains $ext))) {
+                              return $false
+                          }
+
+                          # Only scrub checksums for media files (for example .mkv.md5, .mp4.md5).
+                          $baseName = [System.IO.Path]::GetFileNameWithoutExtension($_.Name)
+                          $baseExt = [System.IO.Path]::GetExtension($baseName).ToLower()
+                          return ($videoExtensions -contains $baseExt)
+                      })
         $script:stats.TotalFiles = $allFiles.Count
         
-        Write-Host "Found $($allFiles.Count) video files to analyze" -ForegroundColor Cyan
+        Write-Host "Found $($allFiles.Count) target files to analyze" -ForegroundColor Cyan
         
         # Analyze files for garbage words
         $fileCount = 0
@@ -327,7 +346,7 @@ function Show-ScanResults {
     Write-Host "  Folders with garbage words:      $($script:stats.FoldersWithGarbage)" -ForegroundColor $(if($script:stats.FoldersWithGarbage -gt 0){"Red"}else{"Green"})
     
     Write-Host "`nFiles:" -ForegroundColor Cyan
-    Write-Host "  Total video files scanned:       $($script:stats.TotalFiles)"
+    Write-Host "  Total files scanned:             $($script:stats.TotalFiles)"
     Write-Host "  Files with garbage words:        $($script:stats.FilesWithGarbage)" -ForegroundColor $(if($script:stats.FilesWithGarbage -gt 0){"Red"}else{"Green"})
     
     Write-Host "`nGarbage Words Found (Top 20):" -ForegroundColor Cyan

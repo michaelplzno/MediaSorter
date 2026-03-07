@@ -1,0 +1,8 @@
+﻿fqm : 164
+ac3d : 123
+casstudio : 26
+dv.hdr : 16
+sauerkraut : 16
+ivy : 16
+zerotwo : 16
+reward : 11

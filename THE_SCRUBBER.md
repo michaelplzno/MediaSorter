@@ -11,6 +11,7 @@ TheScrubber is a PowerShell utility that removes "garbage words" from media file
 ### Step 1: Scan
 
 - Scans the target drive for all video files and folders
+- Also scans video checksum cache files under `.integrity_cache` (for example `.mkv.md5`, `.mp4.md5`)
 - Identifies garbage words in filenames (1080p, x265, BluRay, etc.)
 - Generates statistics on what was found
 - Creates a report of all garbage words and their frequency
@@ -18,6 +19,7 @@ TheScrubber is a PowerShell utility that removes "garbage words" from media file
 ### Step 2: Clean
 
 - Renames files and folders to remove garbage words
+- Renames checksum cache files so cache filenames stay aligned with scrubbed media filenames
 - Preserves the meaningful parts of filenames (show name, episode info)
 - Cleans up extra delimiters and spacing
 - Logs all operations for reference
@@ -32,7 +34,7 @@ TheScrubber identifies and removes these categories of garbage words:
 
 ### Quality/Source
 
-`BluRay`, `BDRip`, `BRRip`, `Remux`, `WEB-DL`, `WEBRip`, `HDTV`, `DVDRip`, `WebHD`, `HDCAM`, `CAM`, `TS`, `TC`, `DVDSCR`, `SCREENER`, `PDTV`, `SDTV`, `DSR`, `HDRip`, `PPVRip`, `VHSRip`, `VODRip`, `AMZN`, `NF`, `DSNP`, `HMAX`, `ATVP`
+`BluRay`, `BDRip`, `BRRip`, `Remux`, `WEB-DL`, `WEBRip`, `HDTV`, `DVDRip`, `WebHD`, `HDCAM`, `CAM`, `TS`, `TC`, `DVDSCR`, `SCREENER`, `PDTV`, `SDTV`, `DSR`, `HDRip`, `PPVRip`, `VHSRip`, `VODRip`, `AMZN`, `NF`, `DSNP`, `HMAX`, `ATVP`, `NTSC`
 
 ### Resolution
 
@@ -40,11 +42,11 @@ TheScrubber identifies and removes these categories of garbage words:
 
 ### Video Codecs
 
-`x264`, `x265`, `h264`, `h265`, `HEVC`, `AVC`, `XviD`, `DivX`, `VP8`, `VP9`, `AV1`, `MPEG2`, `MPEG4`, `10bit`, `8bit`
+`x264`, `x265`, `h264`, `h265`, `HEVC`, `AVC`, `XviD`, `DivX`, `VP8`, `VP9`, `AV1`, `MPEG2`, `MPEG4`, `10bit`, `8bit`, `0.H.264`, `DV.HDR`
 
 ### Audio Codecs
 
-`AAC`, `AC3`, `DTS`, `TrueHD`, `Atmos`, `EAC3`, `DD5`, `DDP5`, `MP3`, `FLAC`, `DD51`, `DTS-HD`, `DTSHD`, `MA`, `DD`, `DDP`, `DD+`, `E-AC-3`
+`AAC`, `AC3`, `DTS`, `TrueHD`, `Atmos`, `EAC3`, `DD5`, `DDP5`, `MP3`, `FLAC`, `DD51`, `DTS-HD`, `DTSHD`, `MA`, `DD`, `DDP`, `DD+`, `E-AC-3`, `AAC2.0`, `DDP2`
 
 ### Release Info
 
@@ -53,6 +55,10 @@ TheScrubber identifies and removes these categories of garbage words:
 ### Audio/Subtitle Options
 
 `MULTi`, `DUAL`, `SUBBED`, `DUBBED`, `DL`, `SUBS`, `MULTISUBS`
+
+### Release Group Tags (Common)
+
+`d3g`, `BKK`, `NTb`, `ZORN`, `FuN`, `SiGMA`, `YTS`, `AC3D`, `MG`, `REWARD`, `SAUERKRAUT`, `FQM`, `iVy`, `ZeroTwo`, `CasStudio`
 
 ## Usage
 
